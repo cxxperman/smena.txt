@@ -1,0 +1,45 @@
+name: Build
+
+# Каждая отправка и каждый запрос на слияние — сборка и проверка.
+# Тег вида v0.1.1 — ещё и релиз с Smena.exe: его подхватит core.txt.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check that the tag matches version.txt
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: powershell
+        run: |
+          $v = (Get-Content version.txt -Raw).Trim()
+          if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match version.txt ($v)" }
+
+      - name: Build
+        shell: powershell
+        run: .\build.ps1
+
+      - name: Self-test
+        shell: powershell
+        run: |
+          $p = Start-Process .\Smena.exe -ArgumentList '--selftest' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "Self-test failed with exit code $($p.ExitCode)" }
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $hash = (Get-FileHash Smena.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content Smena.exe.sha256 $hash -Encoding ascii -NoNewline
+          gh release create "${{ github.ref_name }}" Smena.exe Smena.exe.sha256 --title "Smena ${{ github.ref_name }}" --generate-notes --prerelease
