@@ -131,8 +131,9 @@ namespace DevTxt.Smena
 
             bool online = demo || AppHub.Online;
             if (online) hub.Set("Настройки — в core.txt", Status.Kind.Ok);
-            else hub.Set("core.txt не запущен — всё работает и без него", Status.Kind.None);
-            coreBtn.Set("Открыть core.txt", null, online, delegate { if (!demo) AppHub.ShowCore(); });
+            else if (CoreApp.Installed) hub.Set("core.txt не запущен — всё работает и без него", Status.Kind.None);
+            else hub.Set(CoreApp.Pitch, Status.Kind.None);
+            coreBtn.Set(CoreApp.Label(online), online || CoreApp.Installed ? (Color?)null : Tokens.Palette.Brand, true, delegate { if (!demo) CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
         }
 
         public void ShowWindow()

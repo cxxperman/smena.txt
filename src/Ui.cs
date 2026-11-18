@@ -58,6 +58,8 @@ namespace DevTxt
         // «Меньше движения»: системная настройка Windows; приложение может включить и само
         public static bool ForceReducedMotion = false;
         public static bool ReducedMotion { get { return ForceReducedMotion || !SystemParameters.ClientAreaAnimation; } }
+        // Можно ли двигать элемент: он в настоящем окне (а не в снимке) и движение не выключено
+        public static bool Live(Visual v) { return !ReducedMotion && v != null && PresentationSource.FromVisual(v) != null; }
 
         public static TextBlock T(string text, double size, Brush color, FontWeight weight)
         {
@@ -196,7 +198,7 @@ namespace DevTxt
         // tint == null — стеклянная; иначе залита этим цветом
         public void Set(string label, Color? tint, bool enabled, Action onClick)
         {
-            text.Text = label;
+            Motion.Swap(text, label);
             click = onClick;
             if (tint.HasValue)
             {
@@ -274,19 +276,58 @@ namespace DevTxt
     {
         public readonly Border Root;
         readonly Border fill;
+        readonly TranslateTransform slide = new TranslateTransform();
         double value;
+        bool busy;
 
         public Progress(Color tint)
         {
-            fill = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Solid(tint), HorizontalAlignment = HorizontalAlignment.Left, Width = 0 };
-            Root = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Fill2, Child = fill };
-            Root.SizeChanged += delegate { fill.Width = Root.ActualWidth * value; };
+            fill = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Solid(tint), HorizontalAlignment = HorizontalAlignment.Left, Width = 0, RenderTransform = slide };
+            Root = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Fill2, Child = fill, ClipToBounds = true };
+            Root.SizeChanged += delegate { if (busy) Run(); else Apply(false); };
+        }
+
+        // Заливка доезжает до нового значения плавно; назад (новая загрузка) — сразу
+        void Apply(bool glide)
+        {
+            double to = Root.ActualWidth * value;
+            if (!glide || !Ui.Live(Root) || to < fill.Width)
+            {
+                fill.BeginAnimation(FrameworkElement.WidthProperty, null);
+                fill.Width = to;
+                return;
+            }
+            fill.BeginAnimation(FrameworkElement.WidthProperty, new DoubleAnimation(to, TimeSpan.FromMilliseconds(Tokens.Motion.BaseMs)) { EasingFunction = Ui.EaseOut });
+        }
+
+        void Run()
+        {
+            double w = Root.ActualWidth;
+            fill.BeginAnimation(FrameworkElement.WidthProperty, null);
+            if (!Ui.Live(Root) || w <= 0) { slide.BeginAnimation(TranslateTransform.XProperty, null); slide.X = 0; fill.Width = w; return; }
+            fill.Width = w * 0.3;
+            slide.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(-w * 0.3, w, TimeSpan.FromMilliseconds(1100)) { RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut } });
         }
 
         public double Value
         {
             get { return value; }
-            set { this.value = Math.Max(0, Math.Min(1, value)); fill.Width = Root.ActualWidth * this.value; }
+            set { this.value = Math.Max(0, Math.Min(1, value)); if (!busy) Apply(true); }
+        }
+
+        // Сколько осталось — неизвестно (распаковка, установщик): по дорожке бегает полоска
+        public bool Busy
+        {
+            get { return busy; }
+            set
+            {
+                if (busy == value) return;
+                busy = value;
+                if (busy) { Run(); return; }
+                slide.BeginAnimation(TranslateTransform.XProperty, null);
+                slide.X = 0;
+                Apply(false);
+            }
         }
     }
 
@@ -295,18 +336,33 @@ namespace DevTxt
     {
         public readonly DockPanel Root = new DockPanel();
         readonly Ellipse dot = new Ellipse { Width = 7, Height = 7, Margin = new Thickness(0, 1, 7, 0), VerticalAlignment = VerticalAlignment.Center };
+        readonly SolidColorBrush paint = new SolidColorBrush(Tokens.Dark.Label3);
+        bool busy;
         readonly TextBlock text = Ui.T("", Tokens.Size.Caption, Ui.Label2, FontWeights.Normal);
         public enum Kind { None, Ok, Warn, Bad }
 
         public Status()
         {
+            dot.Fill = paint;
             DockPanel.SetDock(dot, System.Windows.Controls.Dock.Left);   // полное имя: у приложения может быть своё пространство имён «Dock»
             Root.Children.Add(dot);
             Root.Children.Add(text);
         }
 
         public void Set(string label, Kind kind) { Set(label, kind == Kind.Ok ? Tokens.Palette.Green : kind == Kind.Warn ? Tokens.Palette.Orange : kind == Kind.Bad ? Tokens.Palette.Red : Tokens.Dark.Label3); }
-        public void Set(string label, Color color) { text.Text = label; dot.Fill = Ui.Solid(color); }
+        public void Set(string label, Color color)
+        {
+            Motion.Swap(text, label);
+            if (Ui.Live(dot)) paint.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(color, TimeSpan.FromMilliseconds(Tokens.Motion.BaseMs)));
+            else { paint.BeginAnimation(SolidColorBrush.ColorProperty, null); paint.Color = color; }
+        }
+
+        // Идёт работа — точка мерцает
+        public bool Busy
+        {
+            get { return busy; }
+            set { if (busy == value) return; busy = value; Motion.Blink(dot, value); }
+        }
     }
 
     // Переключатель из нескольких вариантов (вкладки, режимы): стеклянная дорожка, выбранный — плотное стекло с кромкой
@@ -315,6 +371,10 @@ namespace DevTxt
         public readonly Border Root;
         readonly System.Collections.Generic.List<Border> items = new System.Collections.Generic.List<Border>();
         readonly Action<int> changed;
+        readonly Border thumb;
+        readonly TranslateTransform thumbX = new TranslateTransform();
+        readonly StackPanel strip;
+        bool moving;
         int index;
 
         public Seg(string[] labels, int selected, Action<int> changed)
@@ -337,14 +397,43 @@ namespace DevTxt
                 items.Add(b);
                 row.Children.Add(b);
             }
-            Root = new Border { CornerRadius = new CornerRadius(16), Padding = new Thickness(3), Background = Ui.GlassFill, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), Child = row, HorizontalAlignment = HorizontalAlignment.Left, SnapsToDevicePixels = true };
+            strip = row;
+            thumb = new Border { Height = 26, Width = 0, CornerRadius = new CornerRadius(13), Background = Ui.GlassStrong, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), HorizontalAlignment = HorizontalAlignment.Left, RenderTransform = thumbX, IsHitTestVisible = false };
+            Root = new Border { CornerRadius = new CornerRadius(16), Padding = new Thickness(3), Background = Ui.GlassFill, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), Child = new Grid { Children = { thumb, row } }, HorizontalAlignment = HorizontalAlignment.Left, SnapsToDevicePixels = true };
+            row.SizeChanged += delegate { if (!moving) Place(false); };
             Paint();
         }
 
         public int Index
         {
             get { return index; }
-            set { index = value; Paint(); }
+            set
+            {
+                if (index == value) return;
+                index = value;
+                moving = true;            // раскладка сейчас сменится (жирность подписи) — плашку не дёргаем, а ведём сами
+                Paint();
+                Root.UpdateLayout();
+                moving = false;
+                Place(true);
+            }
+        }
+
+        // Плашка выбранного: встаёт под свой вариант, при смене — переезжает
+        void Place(bool glide)
+        {
+            if (index < 0 || index >= items.Count) return;
+            double x = items[index].TranslatePoint(new Point(0, 0), strip).X, w = items[index].ActualWidth;
+            if (!glide || !Ui.Live(Root) || thumb.Width <= 0)
+            {
+                thumbX.BeginAnimation(TranslateTransform.XProperty, null); thumbX.X = x;
+                thumb.BeginAnimation(FrameworkElement.WidthProperty, null); thumb.Width = w;
+                return;
+            }
+            var time = TimeSpan.FromMilliseconds(Tokens.Motion.BaseMs);
+            var ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
+            thumbX.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(x, time) { EasingFunction = ease });
+            thumb.BeginAnimation(FrameworkElement.WidthProperty, new DoubleAnimation(w, time) { EasingFunction = ease });
         }
 
         void Paint()
@@ -352,8 +441,8 @@ namespace DevTxt
             for (int i = 0; i < items.Count; i++)
             {
                 bool on = i == index;
-                items[i].Background = on ? Ui.GlassStrong : Brushes.Transparent;
-                items[i].BorderBrush = on ? Ui.Rim : Brushes.Transparent;
+                items[i].Background = Brushes.Transparent;   // выбранного подсвечивает плашка под ним
+                items[i].BorderBrush = Brushes.Transparent;
                 var t = (TextBlock)items[i].Child;
                 t.Foreground = on ? Ui.Label : Ui.Label2;
                 t.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
@@ -422,7 +511,7 @@ namespace DevTxt
         // Появление по очереди: дети поднимаются и проявляются волной, сосед за соседом
         public static void Stagger(Panel panel)
         {
-            if (Ui.ReducedMotion) return;
+            if (!Ui.Live(panel)) return;
             int i = 0;
             foreach (UIElement child in panel.Children)
             {
@@ -442,7 +531,7 @@ namespace DevTxt
         // origin — в долях размера элемента (0.5, 0.5 — из середины).
         public static void GrowFrom(FrameworkElement element, Point origin)
         {
-            if (Ui.ReducedMotion) return;
+            if (!Ui.Live(element)) return;
             var scale = new ScaleTransform(0.86, 0.86);
             element.RenderTransformOrigin = origin;
             element.RenderTransform = scale;
@@ -450,6 +539,153 @@ namespace DevTxt
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(0.86, 1, time) { EasingFunction = Out() });
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(0.86, 1, time) { EasingFunction = Out() });
             element.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, time) { EasingFunction = Out() });
+        }
+
+        static TimeSpan Ms(double ms) { return TimeSpan.FromMilliseconds(ms); }
+        static readonly System.Runtime.CompilerServices.ConditionalWeakTable<UIElement, object> leaving = new System.Runtime.CompilerServices.ConditionalWeakTable<UIElement, object>();
+
+        static string NoDigits(string s)
+        {
+            var b = new System.Text.StringBuilder();
+            foreach (char c in s ?? "") if (!char.IsDigit(c)) b.Append(c);
+            return b.ToString();
+        }
+
+        // Смена надписи: новая проявляется, чуть поднимаясь. Если поменялись только цифры (идёт счёт) — без движения.
+        public static void Swap(TextBlock text, string value)
+        {
+            if (text.Text == value) return;
+            bool counting = NoDigits(text.Text) == NoDigits(value);
+            bool was = text.Text != "";
+            text.Text = value;
+            if (counting || !was || !Ui.Live(text)) return;
+            var shift = new TranslateTransform(0, 5);
+            text.RenderTransform = shift;
+            shift.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(5, 0, Ms(Tokens.Motion.FastMs)) { EasingFunction = Out() });
+            text.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, Ms(Tokens.Motion.FastMs)) { EasingFunction = Out() });
+        }
+
+        // Хлопок: элемент выскакивает с лёгким перелётом — «готово», «получилось»
+        public static void Pop(FrameworkElement element)
+        {
+            if (!Ui.Live(element)) return;
+            var scale = new ScaleTransform(1, 1);
+            element.RenderTransformOrigin = new Point(0.5, 0.5);
+            element.RenderTransform = scale;
+            var a = new DoubleAnimation(0.55, 1, Ms(Tokens.Motion.RevealMs)) { EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.9 } };
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, a);
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, a);
+        }
+
+        // Дыхание: пока идёт работа, элемент мягко растёт и сжимается. Включать и выключать — по одному разу.
+        public static void Breathe(FrameworkElement element, bool on)
+        {
+            if (!on)
+            {
+                var old = element.RenderTransform as ScaleTransform;
+                if (old == null || old.IsFrozen) return;
+                if (!Ui.Live(element)) { old.BeginAnimation(ScaleTransform.ScaleXProperty, null); old.BeginAnimation(ScaleTransform.ScaleYProperty, null); old.ScaleX = old.ScaleY = 1; return; }
+                var back = new DoubleAnimation(1, Ms(Tokens.Motion.BaseMs)) { EasingFunction = Out() };
+                old.BeginAnimation(ScaleTransform.ScaleXProperty, back);
+                old.BeginAnimation(ScaleTransform.ScaleYProperty, back);
+                return;
+            }
+            if (!Ui.Live(element)) return;
+            var scale = new ScaleTransform(1, 1);
+            element.RenderTransformOrigin = new Point(0.5, 0.5);
+            element.RenderTransform = scale;
+            var a = new DoubleAnimation(1, 1.07, Ms(850)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut } };
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, a);
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, a);
+        }
+
+        // Мерцание: точка состояния, пока что-то делается
+        public static void Blink(UIElement element, bool on)
+        {
+            if (!on || !Ui.Live(element)) { element.BeginAnimation(UIElement.OpacityProperty, null); element.Opacity = 1; return; }
+            element.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0.3, Ms(650)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut } });
+        }
+
+        // Показать или спрятать: появляется, съезжая сверху; уходит, растворяясь, и только потом освобождает место
+        public static void Show(FrameworkElement element, bool on)
+        {
+            object mark;
+            bool going = leaving.TryGetValue(element, out mark);
+            bool visible = element.Visibility == Visibility.Visible && !going;
+            if (visible == on) return;
+            if (going) leaving.Remove(element);
+            if (!Ui.Live(element))
+            {
+                element.BeginAnimation(UIElement.OpacityProperty, null);
+                element.Opacity = 1;
+                element.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+                return;
+            }
+            if (on)
+            {
+                element.Visibility = Visibility.Visible;
+                var shift = new TranslateTransform(0, -6);
+                element.RenderTransform = shift;
+                shift.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(-6, 0, Ms(Tokens.Motion.BaseMs)) { EasingFunction = Out() });
+                element.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, Ms(Tokens.Motion.BaseMs)) { EasingFunction = Out() });
+                return;
+            }
+            leaving.Add(element, new object());
+            var fade = new DoubleAnimation(0, Ms(Tokens.Motion.FastMs)) { EasingFunction = Out() };
+            fade.Completed += delegate
+            {
+                object m;
+                if (!leaving.TryGetValue(element, out m)) return;   // за это время снова попросили показать
+                leaving.Remove(element);
+                element.Visibility = Visibility.Collapsed;
+                element.BeginAnimation(UIElement.OpacityProperty, null);
+                element.Opacity = 1;
+            };
+            element.BeginAnimation(UIElement.OpacityProperty, fade);
+        }
+
+        // Вход сбоку: dx > 0 — справа (вперёд), dx < 0 — слева (назад)
+        public static void SlideIn(FrameworkElement element, double dx)
+        {
+            if (!Ui.Live(element)) return;
+            var shift = new TranslateTransform(dx, 0);
+            element.RenderTransform = shift;
+            shift.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(dx, 0, Ms(Tokens.Motion.SlowMs)) { EasingFunction = Out() });
+            element.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, Ms(Tokens.Motion.SlowMs)) { EasingFunction = Out() });
+        }
+
+        // Дрожь: «не получилось»
+        public static void Shake(FrameworkElement element)
+        {
+            if (!Ui.Live(element)) return;
+            var shift = new TranslateTransform();
+            element.RenderTransform = shift;
+            var a = new DoubleAnimationUsingKeyFrames { Duration = Ms(420) };
+            double[] xs = { -8, 7, -5, 3, 0 };
+            for (int i = 0; i < xs.Length; i++) a.KeyFrames.Add(new EasingDoubleKeyFrame(xs[i], KeyTime.FromPercent((i + 1) / (double)xs.Length), new SineEase { EasingMode = EasingMode.EaseInOut }));
+            shift.BeginAnimation(TranslateTransform.XProperty, a);
+        }
+
+        // Вспышка кромки: рамка загорается цветом и гаснет — «готово»
+        public static void Glow(Border border, Color color)
+        {
+            if (!Ui.Live(border)) return;
+            Brush rest = border.BorderBrush;
+            var lit = new SolidColorBrush(color);
+            border.BorderBrush = lit;
+            var a = new ColorAnimation(color, Ui.Alpha(color, 0.15), Ms(Tokens.Motion.RevealMs * 2)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn } };
+            a.Completed += delegate { if (border.BorderBrush == lit) border.BorderBrush = rest; };
+            lit.BeginAnimation(SolidColorBrush.ColorProperty, a);
+        }
+
+        // Заливка по шагам: полоска шага наливается слева направо
+        public static void FillIn(FrameworkElement element)
+        {
+            if (!Ui.Live(element)) return;
+            var scale = new ScaleTransform(0, 1);
+            element.RenderTransformOrigin = new Point(0, 0.5);
+            element.RenderTransform = scale;
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(0, 1, Ms(Tokens.Motion.SlowMs)) { EasingFunction = Out() });
         }
 
         // Набегающее число: текст считает от from до to; show превращает число в надпись («66,0 МБ»)

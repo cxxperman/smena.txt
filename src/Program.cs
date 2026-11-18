@@ -177,6 +177,9 @@ namespace DevTxt.Smena
                 pause = new System.Windows.Forms.ToolStripMenuItem("Приостановить", null, delegate { Prefs.SetPaused(!Prefs.Paused); });
                 menu.Items.Add(pause);
                 menu.Items.Add("О программе", null, delegate { about.ShowWindow(); });
+                var coreItem = new System.Windows.Forms.ToolStripMenuItem("core.txt", null, delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
+                menu.Items.Add(coreItem);
+                menu.Opening += delegate { coreItem.Text = CoreApp.Label(AppHub.Online); };
                 menu.Items.Add("Выход", null, delegate { quit(); });
                 icon = new System.Windows.Forms.NotifyIcon
                 {
