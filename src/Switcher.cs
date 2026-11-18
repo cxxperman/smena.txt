@@ -166,6 +166,12 @@ namespace DevTxt.Smena
                 {
                     if (!session.Open && !OpenView(false, a) && Machine != null) Machine.End();
                 }
+                else if ((a == KeyAction.Next || a == KeyAction.Prev) && !session.Open && Machine != null && Machine.Active && !Machine.Sticky)
+                {
+                    // Перехватчик уже считает, что переключение идёт, а показа нет (прошлый закрылся раньше времени):
+                    // не глотаем Tab впустую — открываем показ
+                    if (!OpenView(false, a == KeyAction.Prev ? KeyAction.OpenBack : KeyAction.Open)) Machine.End();
+                }
                 else if (a == KeyAction.Commit) Commit();
                 else if (a == KeyAction.Cancel) Cancel();
                 else if (session.Move(a)) Select(true);

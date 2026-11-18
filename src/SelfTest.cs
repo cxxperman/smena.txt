@@ -75,6 +75,11 @@ namespace DevTxt.Smena
             const int Tab = KeyMachine.Tab, Alt = KeyMachine.Alt, Shift = KeyMachine.Shift, Esc = KeyMachine.Esc;
 
             Check(System.Text.RegularExpressions.Regex.IsMatch(Program.Id, "^[a-z][a-z0-9-]{0,31}$") && Program.Id != "hub", "app id fits the hub rule");
+            // Сторож Alt+Tab: без окна и без перехватчика ничего не ломается и ничего не ставится
+            Check(!Win.Fullscreen(IntPtr.Zero) && !Win.Elevated(IntPtr.Zero) && Win.Describe(IntPtr.Zero) == "неизвестное окно", "the Alt+Tab watchdog copes with no window");
+            int before = Hook.Refreshes;
+            Hook.Refresh();
+            Check(!Hook.Installed && Hook.Refreshes == before, "refreshing the hook does nothing while it is not installed");
             foreach (string row in Program.Sprite) Check(row.Length == Program.Sprite[0].Length && row.Trim('.', '#', 'E').Length == 0, "sprite rows are of equal length and use only . # E");
 
             // ── Отбор окон и порядок ──

@@ -235,17 +235,22 @@ namespace DevTxt.Smena
 
         // Впереди окно на весь свой монитор и без заголовка (игра, видео)? Рабочий стол и панель задач не в счёт.
         // Вызывается из потока перехватчика: только быстрые вопросы к Windows, ни одного — к самой программе.
-        public static bool FullscreenAhead()
+        public static bool FullscreenAhead() { return Fullscreen(GetForegroundWindow()); }
+
+        // Окно на весь экран без заголовка — игра или видео. Невидимые слои поверх экрана (оверлей NVIDIA, ввод Windows,
+        // прозрачные окна, которые не берут фокус) игрой не считаются: из-за них Alt+Tab отдавался системе через раз.
+        public static bool Fullscreen(IntPtr fg)
         {
             try
             {
-                IntPtr fg = GetForegroundWindow();
                 if (fg == IntPtr.Zero) return false;
+                long ex = GetWindowLongPtr(fg, -20).ToInt64();   // GWL_EXSTYLE
+                if ((ex & (0x80 | 0x08000000 | 0x20)) != 0) return false;   // WS_EX_TOOLWINDOW, WS_EX_NOACTIVATE, WS_EX_TRANSPARENT
                 uint pid;
                 GetWindowThreadProcessId(fg, out pid);
                 if (pid == Self) return false;
                 string cls = Class(fg);
-                if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "XamlExplorerHostIslandWindow") return false;
+                if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" || cls == "XamlExplorerHostIslandWindow" || cls == "Windows.UI.Core.CoreWindow" || cls == "CEF-OSC-WIDGET" || cls == "MultitaskingViewFrame") return false;
                 RECT r;
                 if (!GetWindowRect(fg, out r)) return false;
                 var info = new MONITORINFO { Size = Marshal.SizeOf(typeof(MONITORINFO)) };
@@ -258,6 +263,69 @@ namespace DevTxt.Smena
         }
 
         public static bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+
+        // ───────── Сторож: системный Alt+Tab открылся, хотя должен был наш ─────────
+        public delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time);
+        [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, WinEventProc proc, uint pid, uint thread, uint flags);
+        [DllImport("advapi32.dll")] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+        [DllImport("advapi32.dll")] static extern bool GetTokenInformation(IntPtr token, int cls, out int value, int size, out int length);
+        static WinEventProc watchProc;   // ссылка хранится, чтобы сборщик мусора не убрал её из-под Windows
+
+        // Вызывает seen(окно, что было впереди), когда на экране появился системный переключатель окон при зажатом Alt.
+        // Работает в потоке окна: события приходят через его очередь сообщений и ничего не тормозят.
+        public static void WatchSystemSwitcher(Action<IntPtr> seen)
+        {
+            IntPtr before = IntPtr.Zero;
+            DateTime last = DateTime.MinValue;
+            watchProc = delegate(IntPtr h, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time)
+            {
+                try
+                {
+                    if (obj != 0) return;   // OBJID_WINDOW: само окно, а не что-то внутри него
+                    bool system = ev == 0x0014;   // EVENT_SYSTEM_SWITCHSTART
+                    if (ev == 0x0003)             // EVENT_SYSTEM_FOREGROUND
+                    {
+                        string cls = Class(hwnd);
+                        system = cls == "XamlExplorerHostIslandWindow" || cls == "MultitaskingViewFrame" || cls == "TaskSwitcherWnd";
+                        if (!system) { before = hwnd; return; }
+                    }
+                    if (!system || !KeyDown(KeyMachine.Alt)) return;   // Win+Tab и прочее — не наше дело
+                    if ((DateTime.UtcNow - last).TotalMilliseconds < 800) return;   // одно открытие — одно сообщение
+                    last = DateTime.UtcNow;
+                    seen(before);
+                }
+                catch { }
+            };
+            SetWinEventHook(0x0003, 0x0003, IntPtr.Zero, watchProc, 0, 0, 2);   // WINEVENT_OUTOFCONTEXT | SKIPOWNPROCESS
+            SetWinEventHook(0x0014, 0x0014, IntPtr.Zero, watchProc, 0, 0, 2);
+        }
+
+        // Окно программы, запущенной от администратора. Пока такое окно впереди, Windows не показывает обычным
+        // программам нажатия клавиш — и Alt+Tab там всегда системный. Не смогли спросить — значит, права выше наших.
+        public static bool Elevated(IntPtr hwnd)
+        {
+            uint pid;
+            if (hwnd == IntPtr.Zero || GetWindowThreadProcessId(hwnd, out pid) == 0 || pid == 0) return false;
+            IntPtr p = OpenProcess(0x1000, false, pid);   // PROCESS_QUERY_LIMITED_INFORMATION
+            if (p == IntPtr.Zero) return true;
+            try
+            {
+                IntPtr token;
+                if (!OpenProcessToken(p, 0x0008, out token)) return true;   // TOKEN_QUERY
+                try { int value, length; return GetTokenInformation(token, 20, out value, 4, out length) && value != 0; }   // TokenElevation
+                finally { CloseHandle(token); }
+            }
+            finally { CloseHandle(p); }
+        }
+
+        // Для журнала: «программа — заголовок»
+        public static string Describe(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return "неизвестное окно";
+            string name = "?";
+            try { uint pid; GetWindowThreadProcessId(hwnd, out pid); name = System.Diagnostics.Process.GetProcessById((int)pid).ProcessName; } catch { }
+            return name + " (" + Class(hwnd) + ")";
+        }
 
         // ───────── Окно переключателя ─────────
 

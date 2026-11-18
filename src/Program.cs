@@ -125,6 +125,8 @@ namespace DevTxt.Smena
             Action sync = delegate { Hook.Sync(Prefs.Replace && !Prefs.Paused); };
             Prefs.Changed += sync;
             sync();
+            // Сборщик мусора не останавливает программу надолго: долгая пауза — повод для Windows снять перехватчик
+            try { System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency; } catch { }
 
             AppHub.Show = switcher.OpenSticky;
             AppHub.Start(app.Dispatcher);
@@ -149,6 +151,24 @@ namespace DevTxt.Smena
                     Microsoft.Win32.SystemEvents.PowerModeChanged += delegate(object s, Microsoft.Win32.PowerModeChangedEventArgs e) { if (e.Mode == Microsoft.Win32.PowerModes.Resume) Hook.Restart(); };
                     Microsoft.Win32.SystemEvents.SessionSwitch += delegate(object s, Microsoft.Win32.SessionSwitchEventArgs e) { if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock) Hook.Restart(); };
                 }
+                if (Hook.Allowed)
+                {
+                    // Сторож: если при зажатом Alt открылся системный переключатель, значит, мы клавишу не получили.
+                    // Записываем почему и, если перехватчик сняла Windows, сразу ставим его заново.
+                    Win.WatchSystemSwitcher(delegate(IntPtr before)
+                    {
+                        if (!Prefs.Replace || Prefs.Paused || !Hook.Installed) return;
+                        string who = Win.Describe(before);
+                        if (Prefs.Games && Win.Fullscreen(before)) { Journal.Write("Alt+Tab отдан Windows: впереди окно на весь экран — " + who + ". Это настройка «Не вмешиваться в играх»"); return; }
+                        if (Win.Elevated(before)) { Journal.Write("Alt+Tab не перехвачен: впереди окно с правами администратора — " + who + ". В таких окнах Windows не даёт перехватывать клавиши"); return; }
+                        Journal.Write("Alt+Tab не перехвачен: Windows сняла перехватчик клавиш (впереди " + who + "). Поставлен заново");
+                        Hook.Restart();
+                    });
+                    // И без всякого сбоя перехватчик время от времени ставится заново — без перерыва, незаметно
+                    var refresh = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
+                    refresh.Tick += delegate { if (!switcher.IsOpen) Hook.Refresh(); };
+                    refresh.Start();
+                }
                 // Значки открытых окон добываются заранее и понемногу обновляются — показ их не ждёт
                 Win.WarmIcons();
                 var warm = new DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
@@ -158,6 +178,25 @@ namespace DevTxt.Smena
             app.Run();
             GC.KeepAlive(mutex);
             return 0;
+        }
+    }
+
+    // Журнал: что пошло не так с Alt+Tab и почему. Лежит рядом с настройками, не больше ~200 КБ.
+    static class Journal
+    {
+        public static string File { get { return Path.Combine(Prefs.Dir, "smena.log"); } }
+
+        public static void Write(string line)
+        {
+            try
+            {
+                if (!Prefs.Persist) return;
+                Directory.CreateDirectory(Prefs.Dir);
+                var info = new FileInfo(File);
+                if (info.Exists && info.Length > 200 * 1024) System.IO.File.Delete(File);
+                System.IO.File.AppendAllText(File, DateTime.Now.ToString("s") + " " + line + "\r\n");
+            }
+            catch { }
         }
     }
 

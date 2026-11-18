@@ -25,7 +25,7 @@ namespace DevTxt.Smena
         [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
 
-        const int WH_KEYBOARD_LL = 13, WM_KEYDOWN = 0x100, WM_SYSKEYDOWN = 0x104, WM_QUIT = 0x12;
+        const int WH_KEYBOARD_LL = 13, WM_KEYDOWN = 0x100, WM_SYSKEYDOWN = 0x104, WM_QUIT = 0x12, WM_APP = 0x8000;
         const int LLKHF_ALTDOWN = 0x20;
 
         static readonly object gate = new object();
@@ -39,6 +39,7 @@ namespace DevTxt.Smena
 
         public static bool Allowed;   // false — перехватчик не ставится никогда (--no-hook, --headless, --demo, проверки)
         public static bool Installed { get { return handle != IntPtr.Zero; } }
+        public static int Refreshes;   // сколько раз перехватчик ставился заново без перерыва (для журнала и проверок)
 
         public static void Setup(KeyMachine m, Dispatcher dispatcher, Action<KeyAction> handler)
         {
@@ -67,6 +68,14 @@ namespace DevTxt.Smena
             {
                 if (thread != null) return;
                 var ready = new ManualResetEvent(false);
+                // Код перехватчика компилируется заранее: первая клавиша не ждёт компилятора, а Windows не успевает решить,
+                // что перехватчик завис, и снять его
+                try
+                {
+                    System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(typeof(Hook).GetMethod("Callback", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static).MethodHandle);
+                    System.Runtime.CompilerServices.RuntimeHelpers.PrepareMethod(typeof(KeyMachine).GetMethod("Key").MethodHandle);
+                }
+                catch { }
                 thread = new Thread(delegate()
                 {
                     threadId = GetCurrentThreadId();
@@ -74,12 +83,37 @@ namespace DevTxt.Smena
                     ready.Set();
                     if (handle == IntPtr.Zero) return;
                     MSG msg;
-                    while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0) { }   // перехватчик вызывается, пока поток ждёт сообщений
+                    // перехватчик вызывается, пока поток ждёт сообщений
+                    while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+                    {
+                        if (msg.Message != WM_APP) continue;
+                        // Свежий перехватчик ставится раньше, чем снимается старый: ни одна клавиша не проходит мимо.
+                        // Заодно он снова первый в очереди, если после нас свой перехватчик поставила другая программа.
+                        IntPtr fresh = SetWindowsHookEx(WH_KEYBOARD_LL, proc, GetModuleHandle(null), 0);
+                        if (fresh == IntPtr.Zero) continue;
+                        IntPtr old = handle;
+                        handle = fresh;
+                        UnhookWindowsHookEx(old);
+                        Refreshes++;
+                    }
                     UnhookWindowsHookEx(handle);
                     handle = IntPtr.Zero;
-                }) { IsBackground = true, Name = "smena hook", Priority = ThreadPriority.AboveNormal };
+                }) { IsBackground = true, Name = "smena hook", Priority = ThreadPriority.Highest };
                 thread.Start();
                 ready.WaitOne(2000);
+            }
+        }
+
+        // Поставить перехватчик заново, не снимая его ни на миг. Windows снимает перехватчик молча, если он хоть раз
+        // ответил слишком поздно (так бывает, когда компьютер занят или программа долго не работала), — и тогда
+        // Alt+Tab через раз достаётся системе. Поэтому обновляем его сами: время от времени и сразу, как заметили сбой.
+        public static void Refresh()
+        {
+            lock (gate)
+            {
+                if (thread == null || handle == IntPtr.Zero) return;
+                if (machine != null && machine.Active) return;   // посреди переключения не трогаем
+                PostThreadMessage(threadId, WM_APP, IntPtr.Zero, IntPtr.Zero);
             }
         }
 
