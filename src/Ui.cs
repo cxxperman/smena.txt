@@ -1,9 +1,13 @@
 // kit.txt — общие элементы интерфейса dev.txt™ для C# (WPF): Kapsula, core.txt и всё, что появится позже.
+// Выглядят и ведут себя как Windows 11: фон Mica, светлая и тёмная тема по Windows, скругления 8 и 4,
+// элементы управления и движение по правилам Fluent, переход по Tab с рамкой фокуса.
 // Копируется в приложение как есть, рядом с Tokens.cs, и руками там не правится. Здесь нет ни одного своего
 // цвета, радиуса или длительности — только токены. Те же элементы для веба — в ui/kit.css; менять их нужно вместе.
 // Пишется на C# 5: его понимает компилятор, встроенный в Windows.
 using System;
+using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Interop;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -17,44 +21,136 @@ namespace DevTxt
         public static readonly FontFamily TextFont = new FontFamily(Tokens.Font.Text), DisplayFont = new FontFamily(Tokens.Font.Display);
         public static readonly FontFamily IconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
 
-        public static readonly Brush Bg = Solid(Tokens.Dark.Bg), Label = Solid(Tokens.Dark.Label), Label2 = Solid(Tokens.Dark.Label2), Label3 = Solid(Tokens.Dark.Label3);
-        public static readonly Brush Fill = Solid(Tokens.Dark.Fill), Fill2 = Solid(Tokens.Dark.Fill2);
-        public static readonly Brush GlassFill = Glass(Tokens.GlassDark.FillTop, Tokens.GlassDark.FillBottom);
-        public static readonly Brush GlassHover = Glass(Tokens.GlassDark.HoverTop, Tokens.GlassDark.HoverBottom);
-        public static readonly Brush GlassStrong = Glass(Tokens.GlassDark.StrongTop, Tokens.GlassDark.StrongBottom);
-        public static readonly Brush Rim = MakeRim();
-        // Карточка — стекло потоньше кнопки: кнопка на ней должна читаться
-        public static readonly Brush CardFill = Glass(Tokens.GlassDark.FillTop * 0.55, Tokens.GlassDark.FillBottom * 0.55);
+        // Цвета темы. Кисти общие и не заморожены: когда Windows переключает светлую и тёмную тему,
+        // ApplyTheme перекрашивает их на месте — и всё, что ими нарисовано, меняется само.
+        public static readonly Brush Bg = Live(Tokens.Dark.Bg), Label = Live(Tokens.Dark.Label), Label2 = Live(Tokens.Dark.Label2), Label3 = Live(Tokens.Dark.Label3);
+        public static readonly Brush Fill = Live(Tokens.Dark.Fill), Fill2 = Live(Tokens.Dark.Fill2), Press = Live(Tokens.Dark.FillPress), Separator = Live(Tokens.Dark.Separator);
+        public static readonly Brush GlassFill = Live(Alpha(Colors.White, Tokens.GlassDark.FillTop));      // поле кнопки
+        public static readonly Brush GlassHover = Live(Alpha(Colors.White, Tokens.GlassDark.HoverTop));    // оно же под курсором
+        public static readonly Brush GlassStrong = Live(Alpha(Colors.White, Tokens.GlassDark.StrongTop));
+        public static readonly Brush Rim = Live(Tokens.GlassDark.RimColors[0]);                            // тонкая обводка
+        public static readonly Brush CardFill = Live(Alpha(Colors.White, Tokens.GlassDark.StrongTop));     // карточка, строка настроек
+        public static readonly Brush Thumb = Live(Color.FromRgb(0x45, 0x45, 0x45));                        // бегунок ползунка
+        public static readonly SolidColorBrush AccentBrush = new SolidColorBrush(Tokens.Palette.Brand);     // акцент: по умолчанию оранжевый dev.txt
+        public static readonly SolidColorBrush AccentText = new SolidColorBrush(OnColor(Tokens.Palette.Brand));
         static readonly Brush SpriteBody = Solid(Tokens.Palette.Brand), SpriteEye = Solid(Color.FromRgb(0x1A, 0x1A, 0x1E));
 
+        public static bool Light;                 // сейчас светлая тема
+        public static bool ThemeFollows;          // приложение следует теме Windows (окна; оверлеи вроде дока остаются тёмными)
+        public static event Action ThemeChanged;
+
         public static Brush Solid(Color c) { var b = new SolidColorBrush(c); b.Freeze(); return b; }
+        static SolidColorBrush Live(Color c) { return new SolidColorBrush(c); }
         public static Color Alpha(Color c, double a) { return Color.FromArgb((byte)Math.Round(255 * Math.Max(0, Math.Min(1, a))), c.R, c.G, c.B); }
+        static void Paint(Brush b, Color c) { var s = b as SolidColorBrush; if (s != null && !s.IsFrozen) s.Color = c; }
 
-        static Brush Glass(double top, double bottom)
+        // Текст на цветной заливке: тёмный на светлом цвете, белый на тёмном — как у кнопок Windows
+        public static Color OnColor(Color c)
         {
-            var b = new LinearGradientBrush(Alpha(Colors.White, top), Alpha(Colors.White, bottom), 90);
-            b.Freeze();
-            return b;
+            double l = (0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B) / 255;
+            return l > 0.55 ? Color.FromArgb(0xE4, 0, 0, 0) : Colors.White;
         }
 
-        static Brush MakeRim()
+        public static Color Accent { get { return AccentBrush.Color; } }
+        public static void SetAccent(Color c) { AccentBrush.Color = c; AccentText.Color = OnColor(c); }
+
+        // Цвет акцента Windows («Параметры → Персонализация → Цвета»); null — не удалось узнать
+        public static Color? SystemAccent()
         {
-            var b = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(0.7, 1) };
-            for (int i = 0; i < Tokens.GlassDark.RimColors.Length; i++) b.GradientStops.Add(new GradientStop(Tokens.GlassDark.RimColors[i], Tokens.GlassDark.RimOffsets[i]));
-            b.Freeze();
-            return b;
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\DWM"))
+                {
+                    object v = k != null ? k.GetValue("AccentColor") : null;
+                    if (!(v is int)) return null;
+                    uint abgr = unchecked((uint)(int)v);
+                    return Color.FromRgb((byte)(abgr & 0xFF), (byte)((abgr >> 8) & 0xFF), (byte)((abgr >> 16) & 0xFF));
+                }
+            }
+            catch { return null; }
         }
 
-        // Главная кнопка: залита цветом, сверху чуть светлее
-        public static Brush Tinted(Color c)
+        // Тема приложений Windows: true — светлая
+        public static bool SystemLight()
         {
-            Func<byte, byte> up = delegate(byte v) { return (byte)Math.Min(255, v + 26); };
-            var b = new LinearGradientBrush(Color.FromRgb(up(c.R), up(c.G), up(c.B)), c, 90);
-            b.Freeze();
-            return b;
+            try
+            {
+                using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    object v = k != null ? k.GetValue("AppsUseLightTheme") : null;
+                    return v is int && (int)v == 1;
+                }
+            }
+            catch { return false; }
         }
 
-        public static IEasingFunction EaseOut { get { return new CubicEase { EasingMode = EasingMode.EaseOut }; } }
+        public static void ApplyTheme(bool light)
+        {
+            Light = light;
+            Paint(Bg, light ? Tokens.Light.Bg : Tokens.Dark.Bg);
+            Paint(Label, light ? Tokens.Light.Label : Tokens.Dark.Label);
+            Paint(Label2, light ? Tokens.Light.Label2 : Tokens.Dark.Label2);
+            Paint(Label3, light ? Tokens.Light.Label3 : Tokens.Dark.Label3);
+            Paint(Fill, light ? Tokens.Light.Fill : Tokens.Dark.Fill);
+            Paint(Fill2, light ? Tokens.Light.Fill2 : Tokens.Dark.Fill2);
+            Paint(Press, light ? Tokens.Light.FillPress : Tokens.Dark.FillPress);
+            Paint(Separator, light ? Tokens.Light.Separator : Tokens.Dark.Separator);
+            Paint(GlassFill, Alpha(Colors.White, light ? Tokens.GlassLight.FillTop : Tokens.GlassDark.FillTop));
+            Paint(GlassHover, light ? Alpha(Color.FromRgb(0xF9, 0xF9, 0xF9), Tokens.GlassLight.HoverTop) : Alpha(Colors.White, Tokens.GlassDark.HoverTop));
+            Paint(GlassStrong, Alpha(Colors.White, light ? Tokens.GlassLight.StrongTop : Tokens.GlassDark.StrongTop));
+            Paint(Rim, light ? Tokens.GlassLight.RimColors[0] : Tokens.GlassDark.RimColors[0]);
+            Paint(CardFill, light ? Alpha(Colors.White, Tokens.GlassLight.FillTop) : Alpha(Colors.White, Tokens.GlassDark.StrongTop));
+            Paint(Thumb, light ? Colors.White : Color.FromRgb(0x45, 0x45, 0x45));
+            if (ThemeChanged != null) ThemeChanged();
+        }
+
+        static bool following;
+        // Следить за темой Windows: сразу и каждый раз, когда её переключат
+        public static void FollowSystemTheme()
+        {
+            ApplyTheme(SystemLight());
+            if (following) return;
+            following = true;
+            var ui = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+            Microsoft.Win32.SystemEvents.UserPreferenceChanged += delegate(object s, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+            {
+                if (e.Category != Microsoft.Win32.UserPreferenceCategory.General) return;
+                ui.BeginInvoke(new Action(delegate { bool l = SystemLight(); if (l != Light) ApplyTheme(l); }));
+            };
+        }
+
+        // Заливка кнопки цветом: ровная, как у кнопок Windows 11
+        public static Brush Tinted(Color c) { return Solid(c); }
+
+        // Рамка фокуса с клавиатуры: двойная обводка вокруг элемента, как в Windows
+        public static readonly Style Focus = MakeFocus();
+        static Style MakeFocus()
+        {
+            var border = new FrameworkElementFactory(typeof(Border));
+            border.SetValue(Border.BorderThicknessProperty, new Thickness(2));
+            border.SetValue(Border.BorderBrushProperty, Label);
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(Tokens.Radius.Control + 3));
+            border.SetValue(FrameworkElement.MarginProperty, new Thickness(-3));
+            var style = new Style();
+            style.Setters.Add(new Setter(Control.TemplateProperty, new ControlTemplate { VisualTree = border }));
+            return style;
+        }
+
+        // Элемент можно выбрать клавишей Tab и нажать Enter или пробелом
+        public static void Keyboard(FrameworkElement e, Action press)
+        {
+            e.Focusable = true;
+            e.FocusVisualStyle = Focus;
+            e.KeyDown += delegate(object s, KeyEventArgs k)
+            {
+                if (k.Key != Key.Enter && k.Key != Key.Space) return;
+                k.Handled = true;
+                if (press != null) press();
+            };
+        }
+
+        // «Быстрый вход» Windows: cubic-bezier(0, 0, 0, 1) — резкий старт и долгое мягкое торможение
+        public static IEasingFunction EaseOut { get { return new ExponentialEase { EasingMode = EasingMode.EaseOut, Exponent = 7 }; } }
         // «Меньше движения»: системная настройка Windows; приложение может включить и само
         public static bool ForceReducedMotion = false;
         public static bool ReducedMotion { get { return ForceReducedMotion || !SystemParameters.ClientAreaAnimation; } }
@@ -63,6 +159,7 @@ namespace DevTxt
 
         public static TextBlock T(string text, double size, Brush color, FontWeight weight)
         {
+            if (weight == FontWeights.Bold) weight = FontWeights.SemiBold;   // жирного в шкале Windows нет
             return new TextBlock { Text = text, FontSize = size, Foreground = color, FontWeight = weight, FontFamily = size >= Tokens.Size.Title ? DisplayFont : TextFont, TextTrimming = TextTrimming.CharacterEllipsis };
         }
 
@@ -90,8 +187,8 @@ namespace DevTxt
         {
             return new Border
             {
-                CornerRadius = new CornerRadius(Tokens.Radius.Row), Background = GlassFill, BorderBrush = Rim, BorderThickness = new Thickness(1),
-                Padding = new Thickness(14, 10, 14, 10), Child = child, SnapsToDevicePixels = true
+                CornerRadius = new CornerRadius(Tokens.Radius.Row), Background = CardFill, BorderBrush = Rim, BorderThickness = new Thickness(1),
+                Padding = new Thickness(16, 12, 16, 12), Child = child, SnapsToDevicePixels = true
             };
         }
 
@@ -126,52 +223,120 @@ namespace DevTxt
             return new Viewbox { Width = box, Height = box, Child = canvas, Stretch = Stretch.Uniform, IsHitTestVisible = false };
         }
 
-        // Свечение за стеклом: три цветных пятна на тёмном фоне. Кладётся первым в корень окна.
-        public static Canvas Backdrop() { return Backdrop(920, 640); }
+        // Фон окна. Под Windows 11 его заменяет системный Mica (см. Native) — этот слой тогда прячется;
+        // в Windows 10 и на снимках остаётся ровный цвет темы. Кладётся первым в корень окна.
+        public static Canvas Backdrop() { return Backdrop(0, 0); }
+        public static Canvas Backdrop(double width, double height) { return new Canvas { IsHitTestVisible = false, Background = Bg, Tag = "dt-backdrop" }; }
 
-        // То же для окна другого размера: пятна расставляются в тех же долях ширины и высоты
-        public static Canvas Backdrop(double width, double height)
+        // ───────── Окно как в Windows 11 ─────────
+        [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
+
+        static int build = -1;
+        static int Build
         {
-            double kx = width / 920, ky = height / 640, k = Math.Max(kx, ky);
-            var glow = new Canvas { IsHitTestVisible = false };
-            Action<double, double, double, Color, double> blob = delegate(double x, double y, double size, Color c, double a)
+            get
             {
-                var fill = new RadialGradientBrush();
-                fill.GradientStops.Add(new GradientStop(Alpha(c, a), 0));
-                fill.GradientStops.Add(new GradientStop(Alpha(c, a * 0.55), 0.45));
-                fill.GradientStops.Add(new GradientStop(Alpha(c, 0), 1));
-                fill.Freeze();
-                // центр пятна — в той же доле окна, размер — по большей стороне
-                double side = size * k;
-                var e = new Ellipse { Width = side, Height = side, Fill = fill };
-                Canvas.SetLeft(e, (x + size / 2) * kx - side / 2); Canvas.SetTop(e, (y + size / 2) * ky - side / 2);
-                glow.Children.Add(e);
+                if (build >= 0) return build;
+                try { using (var k = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion")) build = int.Parse((string)k.GetValue("CurrentBuildNumber")); }
+                catch { build = 0; }
+                return build;
+            }
+        }
+        // Mica за всем окном — Windows 11 22H2 и новее
+        public static bool MicaAvailable { get { return Build >= 22621; } }
+
+        // Делает окно родным для Windows 11: системная рамка с тенью и скруглёнными углами, фон Mica,
+        // тёмная или светлая рамка по теме, прилипание к краям экрана и (если resizable) изменение размера.
+        // Шапку окно рисует само; перетаскивать — DragMove, кнопки — CaptionButtons.
+        public static void Native(Window w, bool resizable)
+        {
+            w.WindowStyle = WindowStyle.SingleBorderWindow;
+            w.ResizeMode = resizable ? ResizeMode.CanResize : ResizeMode.CanMinimize;
+            System.Windows.Shell.WindowChrome.SetWindowChrome(w, new System.Windows.Shell.WindowChrome
+            {
+                CaptionHeight = 0, ResizeBorderThickness = new Thickness(resizable ? 6 : 0), GlassFrameThickness = new Thickness(-1),
+                UseAeroCaptionButtons = false, CornerRadius = new CornerRadius(0)
+            });
+            if (ThemeFollows) FollowSystemTheme();
+            w.SourceInitialized += delegate
+            {
+                IntPtr h = new WindowInteropHelper(w).Handle;
+                var src = HwndSource.FromHwnd(h);
+                if (MicaAvailable && src != null && src.CompositionTarget != null)
+                {
+                    src.CompositionTarget.BackgroundColor = Colors.Transparent;
+                    w.Background = Brushes.Transparent;
+                    var root = w.Content as Panel;
+                    if (root != null)
+                    {
+                        root.Background = Brushes.Transparent;
+                        foreach (UIElement c in root.Children) { var fe = c as FrameworkElement; if (fe != null && fe.Tag as string == "dt-backdrop") fe.Visibility = Visibility.Collapsed; }
+                    }
+                }
+                Frame(h);
+                Action again = delegate { Frame(h); };
+                ThemeChanged += again;
+                w.Closed += delegate { ThemeChanged -= again; };
             };
-            blob(-380, -420, 1000, Tokens.Palette.Brand, 0.42);
-            blob(380, 240, 900, Tokens.Palette.Blue, 0.26);
-            blob(520, -360, 760, Tokens.Palette.Purple, 0.2);
-            return glow;
+            // Развёрнутое окно с такой рамкой заходит за край экрана на толщину рамки — отступаем
+            w.StateChanged += delegate { var root = w.Content as FrameworkElement; if (root != null) root.Margin = w.WindowState == WindowState.Maximized ? new Thickness(7) : new Thickness(0); };
+        }
+
+        static void Frame(IntPtr h)
+        {
+            int dark = Light ? 0 : 1, round = 2, backdrop = 2;
+            DwmSetWindowAttribute(h, 20, ref dark, 4);     // DWMWA_USE_IMMERSIVE_DARK_MODE
+            DwmSetWindowAttribute(h, 33, ref round, 4);    // DWMWA_WINDOW_CORNER_PREFERENCE: скруглять
+            if (MicaAvailable) DwmSetWindowAttribute(h, 38, ref backdrop, 4);   // DWMWA_SYSTEMBACKDROP_TYPE: Mica
+        }
+
+        // Кнопки окна Windows 11: «Свернуть», «Развернуть» (если окно меняет размер) и «Закрыть» — 46×32,
+        // значки Segoe Fluent Icons; «Закрыть» под курсором красная. close — что делать вместо обычного закрытия.
+        public static StackPanel CaptionButtons(Window w, Action close)
+        {
+            var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top };
+            Func<string, string, bool, Action, Border> make = delegate(string glyph, string tip, bool danger, Action click)
+            {
+                var t = new TextBlock { Text = glyph, FontFamily = IconFont, FontSize = 10, Foreground = Label, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+                var b = new Border { Width = 46, Height = 32, Background = Brushes.Transparent, Child = t, ToolTip = tip };
+                b.MouseEnter += delegate { b.Background = danger ? Solid(Tokens.Palette.Red) : Fill2; if (danger) t.Foreground = Brushes.White; };
+                b.MouseLeave += delegate { b.Background = Brushes.Transparent; t.Foreground = Label; };
+                b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; if (!danger) b.Background = Press; };
+                b.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; click(); };
+                return b;
+            };
+            row.Children.Add(make("\uE921", "Свернуть", false, delegate { w.WindowState = WindowState.Minimized; }));
+            if (w.ResizeMode == ResizeMode.CanResize)
+            {
+                Border max = null;
+                max = make("\uE922", "Развернуть", false, delegate { w.WindowState = w.WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized; });
+                w.StateChanged += delegate { ((TextBlock)max.Child).Text = w.WindowState == WindowState.Maximized ? "\uE923" : "\uE922"; max.ToolTip = w.WindowState == WindowState.Maximized ? "Свернуть в окно" : "Развернуть"; };
+                row.Children.Add(max);
+            }
+            row.Children.Add(make("\uE8BB", "Закрыть", true, close ?? new Action(w.Close)));
+            return row;
         }
     }
 
-    // Кнопка-капсула: стеклянная или залитая цветом. Под курсором светлеет, при нажатии чуть сжимается.
+    // Кнопка Windows 11: углы 4, высота 32. Обычная — поле с тонкой обводкой; главная — залита цветом акцента,
+    // текст на ней тёмный или белый по яркости цвета. Под курсором светлеет, при нажатии тускнеет — без «прыжков».
     class Btn
     {
         public readonly Border Root;
         readonly TextBlock text;
-        readonly ScaleTransform scale = new ScaleTransform(1, 1);
-        Brush idle, hover;
+        Brush idle, hover, press;
         Action click;
         bool pressed;
 
         public Btn()
         {
-            text = new TextBlock { FontSize = Tokens.Size.Body, FontWeight = FontWeights.SemiBold, FontFamily = Ui.TextFont, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
+            text = new TextBlock { FontSize = Tokens.Size.Body, FontFamily = Ui.TextFont, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
             Root = new Border
             {
-                Height = 32, MinWidth = 96, CornerRadius = new CornerRadius(16), Padding = new Thickness(16, 0, 16, 1), BorderThickness = new Thickness(1),
-                Child = text, Cursor = Cursors.Hand, RenderTransform = scale, RenderTransformOrigin = new Point(0.5, 0.5), SnapsToDevicePixels = true
+                Height = 32, MinWidth = 96, CornerRadius = new CornerRadius(Tokens.Radius.Control), Padding = new Thickness(12, 0, 12, 1), BorderThickness = new Thickness(1),
+                Child = text, SnapsToDevicePixels = true
             };
+            Ui.Keyboard(Root, delegate { if (click != null && Root.IsHitTestVisible) click(); });
             Root.MouseEnter += delegate { Root.Background = hover; };
             Root.MouseLeave += delegate { Root.Background = idle; Press(false); };
             Root.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Press(true); };
@@ -188,64 +353,88 @@ namespace DevTxt
         {
             if (pressed == on) return;
             pressed = on;
-            double to = on ? 0.965 : 1;
-            if (Ui.ReducedMotion) { scale.BeginAnimation(ScaleTransform.ScaleXProperty, null); scale.BeginAnimation(ScaleTransform.ScaleYProperty, null); scale.ScaleX = scale.ScaleY = to; return; }
-            var a = new DoubleAnimation(to, TimeSpan.FromMilliseconds(on ? Tokens.Motion.PressMs : Tokens.Motion.FastMs)) { EasingFunction = Ui.EaseOut };
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, a);
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, a);
+            Root.Background = on ? press : Root.IsMouseOver ? hover : idle;
+            text.Opacity = on ? 0.786 : 1;   // нажатая кнопка Windows: текст приглушается
         }
 
-        // tint == null — стеклянная; иначе залита этим цветом
+        // tint == null — обычная; иначе залита этим цветом
         public void Set(string label, Color? tint, bool enabled, Action onClick)
         {
             Motion.Swap(text, label);
             click = onClick;
             if (tint.HasValue)
             {
-                idle = Ui.Tinted(tint.Value);
-                hover = Ui.Tinted(Color.FromRgb((byte)Math.Min(255, tint.Value.R + 14), (byte)Math.Min(255, tint.Value.G + 14), (byte)Math.Min(255, tint.Value.B + 14)));
-                Root.BorderBrush = Ui.Solid(Ui.Alpha(Colors.White, 0.22));
-                text.Foreground = Brushes.White;
+                idle = Ui.Solid(tint.Value);
+                hover = Ui.Solid(Ui.Alpha(tint.Value, 0.9));
+                press = Ui.Solid(Ui.Alpha(tint.Value, 0.8));
+                Root.BorderBrush = Ui.Solid(Ui.Alpha(Colors.White, 0.08));
+                text.Foreground = Ui.Solid(Ui.OnColor(tint.Value));
             }
             else
             {
-                idle = Ui.GlassFill; hover = Ui.GlassHover;
+                idle = Ui.GlassFill; hover = Ui.GlassHover; press = Ui.Press;
                 Root.BorderBrush = Ui.Rim;
                 text.Foreground = Ui.Label;
             }
             Root.Background = Root.IsMouseOver ? hover : idle;
             Root.IsHitTestVisible = enabled;
-            Root.Opacity = enabled ? 1 : 0.45;
+            Root.Focusable = enabled;
+            Root.Opacity = enabled ? 1 : 0.5;
             Root.Visibility = Visibility.Visible;
         }
 
         public void Hide() { Root.Visibility = Visibility.Collapsed; }
     }
 
-    // Переключатель: бегунок скользит, дорожка наливается зелёным. При «Меньше движения» — сразу на месте.
+    // Переключатель Windows 11: 40×20. Выключен — пустая дорожка с обводкой и серым бегунком;
+    // включён — дорожка цвета акцента. Под курсором бегунок чуть крупнее. Пробел и Enter тоже переключают.
     class Switch
     {
         public readonly Border Root;
+        readonly Border knob;
         readonly TranslateTransform knobX = new TranslateTransform();
-        readonly SolidColorBrush track;
+        readonly ScaleTransform knobScale = new ScaleTransform(1, 1);
         readonly Action<bool> changed;
         bool on;
-        const double W = 46, H = 28, Knob = 24;
+        const double W = 40, H = 20, Knob = 12;
 
         public Switch(bool state, Action<bool> changed)
         {
             on = state;
             this.changed = changed;
-            track = new SolidColorBrush(on ? Tokens.Palette.Green : Tokens.Dark.Fill2);
-            var knob = new Border
+            var move = new TransformGroup();
+            move.Children.Add(knobScale);
+            move.Children.Add(knobX);
+            knob = new Border
             {
-                Width = Knob, Height = Knob, CornerRadius = new CornerRadius(Knob / 2), Background = Brushes.White, HorizontalAlignment = HorizontalAlignment.Left,
-                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 0, 0), RenderTransform = knobX,
-                Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 6, ShadowDepth = 1.5, Direction = 270, Opacity = 0.28, Color = Colors.Black }
+                Width = Knob, Height = Knob, CornerRadius = new CornerRadius(Knob / 2), HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(3, 0, 0, 0), RenderTransform = move, RenderTransformOrigin = new Point(0.5, 0.5)
             };
-            knobX.X = on ? W - Knob - 4 : 0;
-            Root = new Border { Width = W, Height = H, CornerRadius = new CornerRadius(H / 2), Background = track, Child = knob, Cursor = Cursors.Hand };
-            Root.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Value = !on; if (this.changed != null) this.changed(on); };
+            Root = new Border { Width = W, Height = H, CornerRadius = new CornerRadius(H / 2), BorderThickness = new Thickness(1), Child = knob, SnapsToDevicePixels = true };
+            knobX.X = on ? Travel : 0;
+            Paint();
+            Action toggle = delegate { Value = !on; if (this.changed != null) this.changed(on); };
+            Ui.Keyboard(Root, toggle);
+            Root.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; toggle(); };
+            Root.MouseEnter += delegate { Grow(1.17); };
+            Root.MouseLeave += delegate { Grow(1); };
+        }
+
+        static double Travel { get { return W - 2 - 6 - Knob; } }
+
+        void Paint()
+        {
+            Root.Background = on ? (Brush)Ui.AccentBrush : Ui.Fill;
+            Root.BorderBrush = on ? (Brush)Ui.AccentBrush : Ui.Label2;
+            knob.Background = on ? (Brush)Ui.AccentText : Ui.Label2;
+        }
+
+        void Grow(double k)
+        {
+            if (!Ui.Live(Root)) { knobScale.ScaleX = knobScale.ScaleY = k; return; }
+            var a = new DoubleAnimation(k, TimeSpan.FromMilliseconds(Tokens.Motion.FastMs)) { EasingFunction = Ui.EaseOut };
+            knobScale.BeginAnimation(ScaleTransform.ScaleXProperty, a);
+            knobScale.BeginAnimation(ScaleTransform.ScaleYProperty, a);
         }
 
         public bool Value
@@ -255,18 +444,10 @@ namespace DevTxt
             {
                 if (on == value) return;
                 on = value;
-                double to = on ? W - Knob - 4 : 0;
-                Color c = on ? Tokens.Palette.Green : Tokens.Dark.Fill2;
-                if (Ui.ReducedMotion)
-                {
-                    knobX.BeginAnimation(TranslateTransform.XProperty, null); knobX.X = to;
-                    track.BeginAnimation(SolidColorBrush.ColorProperty, null); track.Color = c;
-                    return;
-                }
-                var ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
-                var time = TimeSpan.FromMilliseconds(Tokens.Motion.BaseMs);
-                knobX.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(to, time) { EasingFunction = ease });
-                track.BeginAnimation(SolidColorBrush.ColorProperty, new ColorAnimation(c, time) { EasingFunction = ease });
+                Paint();
+                double to = on ? Travel : 0;
+                if (!Ui.Live(Root)) { knobX.BeginAnimation(TranslateTransform.XProperty, null); knobX.X = to; return; }
+                knobX.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(to, TimeSpan.FromMilliseconds(Tokens.Motion.FastMs)) { EasingFunction = Ui.EaseOut });
             }
         }
     }
@@ -282,8 +463,10 @@ namespace DevTxt
 
         public Progress(Color tint)
         {
-            fill = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Solid(tint), HorizontalAlignment = HorizontalAlignment.Left, Width = 0, RenderTransform = slide };
-            Root = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Fill2, Child = fill, ClipToBounds = true };
+            // Как у Windows 11: дорожка в 1 точку и полоса в 3 точки цвета акцента (tint оставлен для совместимости)
+            fill = new Border { Height = 3, CornerRadius = new CornerRadius(1.5), Background = Ui.AccentBrush, HorizontalAlignment = HorizontalAlignment.Left, Width = 0, RenderTransform = slide };
+            var track = new Border { Height = 1, Background = Ui.Label3, VerticalAlignment = VerticalAlignment.Center };
+            Root = new Border { Height = 3, Background = Brushes.Transparent, Child = new Grid { Children = { track, fill } }, ClipToBounds = true };
             Root.SizeChanged += delegate { if (busy) Run(); else Apply(false); };
         }
 
@@ -365,87 +548,75 @@ namespace DevTxt
         }
     }
 
-    // Переключатель из нескольких вариантов (вкладки, режимы): стеклянная дорожка, выбранный — плотное стекло с кромкой
+    // Вкладки или режимы — как SelectorBar в Windows 11: подписи без рамок, под выбранной — короткая
+    // полоска цвета акцента, которая переезжает при смене. Стрелки влево и вправо тоже переключают.
     class Seg
     {
         public readonly Border Root;
         readonly System.Collections.Generic.List<Border> items = new System.Collections.Generic.List<Border>();
         readonly Action<int> changed;
-        readonly Border thumb;
-        readonly TranslateTransform thumbX = new TranslateTransform();
+        readonly Border pill;
+        readonly TranslateTransform pillX = new TranslateTransform();
         readonly StackPanel strip;
-        bool moving;
         int index;
+        const double PillW = 16;
 
         public Seg(string[] labels, int selected, Action<int> changed)
         {
             this.changed = changed;
             index = selected;
-            var row = new StackPanel { Orientation = Orientation.Horizontal };
+            strip = new StackPanel { Orientation = Orientation.Horizontal };
             for (int i = 0; i < labels.Length; i++)
             {
                 int n = i;
                 var t = new TextBlock { Text = labels[i], FontSize = Tokens.Size.Body, FontFamily = Ui.TextFont, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
-                var b = new Border { Height = 26, MinWidth = 44, CornerRadius = new CornerRadius(13), Padding = new Thickness(14, 0, 14, 1), BorderThickness = new Thickness(1), Child = t, Cursor = Cursors.Hand, Margin = new Thickness(i == 0 ? 0 : 2, 0, 0, 0) };
-                b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
-                {
-                    e.Handled = true;
-                    if (index == n) return;
-                    Index = n;
-                    if (this.changed != null) this.changed(n);
-                };
+                var b = new Border { Height = 34, MinWidth = 44, CornerRadius = new CornerRadius(Tokens.Radius.Control), Padding = new Thickness(12, 0, 12, 2), Child = t, Background = Brushes.Transparent, Margin = new Thickness(i == 0 ? 0 : 2, 0, 0, 0) };
+                b.MouseEnter += delegate { b.Background = Ui.Fill; };
+                b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
+                b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Pick(n); };
                 items.Add(b);
-                row.Children.Add(b);
+                strip.Children.Add(b);
             }
-            strip = row;
-            thumb = new Border { Height = 26, Width = 0, CornerRadius = new CornerRadius(13), Background = Ui.GlassStrong, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), HorizontalAlignment = HorizontalAlignment.Left, RenderTransform = thumbX, IsHitTestVisible = false };
-            Root = new Border { CornerRadius = new CornerRadius(16), Padding = new Thickness(3), Background = Ui.GlassFill, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), Child = new Grid { Children = { thumb, row } }, HorizontalAlignment = HorizontalAlignment.Left, SnapsToDevicePixels = true };
-            row.SizeChanged += delegate { if (!moving) Place(false); };
+            pill = new Border { Width = PillW, Height = 3, CornerRadius = new CornerRadius(1.5), Background = Ui.AccentBrush, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Bottom, RenderTransform = pillX, IsHitTestVisible = false, Margin = new Thickness(0, 0, 0, 2) };
+            Root = new Border { Background = Brushes.Transparent, Child = new Grid { Children = { strip, pill } }, HorizontalAlignment = HorizontalAlignment.Left, SnapsToDevicePixels = true };
+            Root.Focusable = true;
+            Root.FocusVisualStyle = Ui.Focus;
+            Root.KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.Key == Key.Left && index > 0) { e.Handled = true; Pick(index - 1); }
+                else if (e.Key == Key.Right && index < items.Count - 1) { e.Handled = true; Pick(index + 1); }
+            };
+            strip.SizeChanged += delegate { Place(false); };
             Paint();
+        }
+
+        void Pick(int n)
+        {
+            if (index == n) return;
+            Index = n;
+            if (changed != null) changed(n);
         }
 
         public int Index
         {
             get { return index; }
-            set
-            {
-                if (index == value) return;
-                index = value;
-                moving = true;            // раскладка сейчас сменится (жирность подписи) — плашку не дёргаем, а ведём сами
-                Paint();
-                Root.UpdateLayout();
-                moving = false;
-                Place(true);
-            }
+            set { if (index == value) return; index = value; Paint(); Place(true); }
         }
 
-        // Плашка выбранного: встаёт под свой вариант, при смене — переезжает
         void Place(bool glide)
         {
-            if (index < 0 || index >= items.Count) return;
-            double x = items[index].TranslatePoint(new Point(0, 0), strip).X, w = items[index].ActualWidth;
-            if (!glide || !Ui.Live(Root) || thumb.Width <= 0)
-            {
-                thumbX.BeginAnimation(TranslateTransform.XProperty, null); thumbX.X = x;
-                thumb.BeginAnimation(FrameworkElement.WidthProperty, null); thumb.Width = w;
-                return;
-            }
-            var time = TimeSpan.FromMilliseconds(Tokens.Motion.BaseMs);
-            var ease = new CubicEase { EasingMode = EasingMode.EaseInOut };
-            thumbX.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(x, time) { EasingFunction = ease });
-            thumb.BeginAnimation(FrameworkElement.WidthProperty, new DoubleAnimation(w, time) { EasingFunction = ease });
+            if (index < 0 || index >= items.Count || items[index].ActualWidth <= 0) return;
+            double x = items[index].TranslatePoint(new Point(0, 0), strip).X + (items[index].ActualWidth - PillW) / 2;
+            if (!glide || !Ui.Live(Root)) { pillX.BeginAnimation(TranslateTransform.XProperty, null); pillX.X = x; return; }
+            pillX.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(x, TimeSpan.FromMilliseconds(Tokens.Motion.BaseMs)) { EasingFunction = Ui.EaseOut });
         }
 
         void Paint()
         {
             for (int i = 0; i < items.Count; i++)
             {
-                bool on = i == index;
-                items[i].Background = Brushes.Transparent;   // выбранного подсвечивает плашка под ним
-                items[i].BorderBrush = Brushes.Transparent;
                 var t = (TextBlock)items[i].Child;
-                t.Foreground = on ? Ui.Label : Ui.Label2;
-                t.FontWeight = on ? FontWeights.SemiBold : FontWeights.Normal;
+                t.Foreground = i == index ? Ui.Label : Ui.Label2;
             }
         }
     }
@@ -459,18 +630,22 @@ namespace DevTxt
         readonly double min, max, step;
         readonly Action<double> changed;
         double value;
-        const double W = 168, Knob = 18;
+        const double W = 168, Knob = 20;
 
         public Slider(double min, double max, double step, double value, Color tint, Action<double> changed)
         {
             this.min = min; this.max = Math.Max(max, min + 1e-9); this.step = step; this.changed = changed;
-            fill = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Solid(tint), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(Knob / 2, 0, 0, 0) };
-            var track = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Fill2, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(Knob / 2, 0, Knob / 2, 0) };
+            // Как у Windows 11: дорожка 4, заливка цветом акцента (tint оставлен для совместимости), бегунок — диск с точкой акцента
+            fill = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.AccentBrush, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(Knob / 2, 0, 0, 0) };
+            var track = new Border { Height = 4, CornerRadius = new CornerRadius(2), Background = Ui.Label3, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(Knob / 2, 0, Knob / 2, 0) };
+            var dot = new Ellipse { Width = 12, Height = 12, Fill = Ui.AccentBrush, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
             knob = new Border
             {
-                Width = Knob, Height = Knob, CornerRadius = new CornerRadius(Knob / 2), Background = Brushes.White, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, RenderTransform = knobX,
-                Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 6, ShadowDepth = 1.5, Direction = 270, Opacity = 0.28, Color = Colors.Black }
+                Width = Knob, Height = Knob, CornerRadius = new CornerRadius(Knob / 2), Background = Ui.Thumb, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), Child = dot,
+                HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, RenderTransform = knobX
             };
+            knob.MouseEnter += delegate { dot.Width = dot.Height = 14; };
+            knob.MouseLeave += delegate { dot.Width = dot.Height = 12; };
             Root = new Grid { Width = W, Height = 24, Background = Brushes.Transparent, Cursor = Cursors.Hand, Children = { track, fill, knob } };
             Root.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Root.CaptureMouse(); Move(e.GetPosition(Root).X); };
             Root.MouseMove += delegate(object s, MouseEventArgs e) { if (Root.IsMouseCaptured) Move(e.GetPosition(Root).X); };
@@ -503,10 +678,59 @@ namespace DevTxt
         }
     }
 
+    // Меню Windows 11 — настоящее системное: скруглённое, на матовом стекле, светлое или тёмное по теме.
+    // Для значка в трее и любых других контекстных меню вместо меню WinForms (те выглядят как в Windows 7).
+    static class NativeMenu
+    {
+        public class Item
+        {
+            public string Label; public Action Act; public bool Check, Line, Disabled;
+            public Item(string label, Action act) { Label = label; Act = act; }
+            public static Item Separator { get { return new Item(null, null) { Line = true }; } }
+        }
+
+        [StructLayout(LayoutKind.Sequential)] struct POINT { public int X, Y; }
+        [DllImport("user32.dll")] static extern IntPtr CreatePopupMenu();
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern bool AppendMenu(IntPtr menu, uint flags, UIntPtr id, string text);
+        [DllImport("user32.dll")] static extern int TrackPopupMenuEx(IntPtr menu, uint flags, int x, int y, IntPtr hwnd, IntPtr tpm);
+        [DllImport("user32.dll")] static extern bool DestroyMenu(IntPtr menu);
+        [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
+        [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+        // Тёмные системные меню: так делают сами приложения Windows (Блокнот, Проводник); функция есть с Windows 10 1903
+        [DllImport("uxtheme.dll", EntryPoint = "#135")] static extern int SetPreferredAppMode(int mode);
+        [DllImport("uxtheme.dll", EntryPoint = "#136")] static extern void FlushMenuThemes();
+
+        static HwndSource owner;   // невидимое окно-хозяин: без него меню не закрывается щелчком мимо
+
+        public static void Show(params Item[] items)
+        {
+            if (owner == null) owner = new HwndSource(new HwndSourceParameters("dev.txt menu") { Width = 0, Height = 0, WindowStyle = unchecked((int)0x80000000), ExtendedWindowStyle = 0x80 });
+            try { SetPreferredAppMode(Ui.Light ? 3 : 2); FlushMenuThemes(); } catch { }   // 2 — всегда тёмные, 3 — всегда светлые
+            IntPtr m = CreatePopupMenu();
+            try
+            {
+                for (int i = 0; i < items.Length; i++)
+                {
+                    if (items[i].Line) { AppendMenu(m, 0x800, UIntPtr.Zero, null); continue; }   // MF_SEPARATOR
+                    uint flags = (items[i].Check ? 0x8u : 0) | (items[i].Disabled ? 0x1u : 0);   // MF_CHECKED, MF_GRAYED
+                    AppendMenu(m, flags, new UIntPtr((uint)(i + 1)), items[i].Label);
+                }
+                POINT p;
+                GetCursorPos(out p);
+                SetForegroundWindow(owner.Handle);
+                int cmd = TrackPopupMenuEx(m, 0x100 | 0x2 | 0x20, p.X, p.Y, owner.Handle, IntPtr.Zero);   // RETURNCMD, RIGHTBUTTON, BOTTOMALIGN
+                PostMessage(owner.Handle, 0, IntPtr.Zero, IntPtr.Zero);   // WM_NULL: так меню трея закрывается правильно
+                if (cmd > 0 && cmd <= items.Length && items[cmd - 1].Act != null) items[cmd - 1].Act();
+            }
+            finally { DestroyMenu(m); }
+        }
+    }
+
     // Движение — общие приёмы; те же, что в ui/kit.css. При «Меньше движения» всё сразу встаёт на место.
     static class Motion
     {
-        static IEasingFunction Out() { return new CubicEase { EasingMode = EasingMode.EaseOut }; }
+        static IEasingFunction Out() { return Ui.EaseOut; }
 
         // Появление по очереди: дети поднимаются и проявляются волной, сосед за соседом
         public static void Stagger(Panel panel)
@@ -572,31 +796,16 @@ namespace DevTxt
             var scale = new ScaleTransform(1, 1);
             element.RenderTransformOrigin = new Point(0.5, 0.5);
             element.RenderTransform = scale;
-            var a = new DoubleAnimation(0.55, 1, Ms(Tokens.Motion.RevealMs)) { EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.9 } };
+            var a = new DoubleAnimation(0.8, 1, Ms(Tokens.Motion.SlowMs)) { EasingFunction = Out() };   // без перелёта: Windows не «прыгает»
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, a);
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, a);
         }
 
-        // Дыхание: пока идёт работа, элемент мягко растёт и сжимается. Включать и выключать — по одному разу.
+        // Идёт работа: элемент мягко приглушается и возвращается. Включать и выключать — по одному разу.
         public static void Breathe(FrameworkElement element, bool on)
         {
-            if (!on)
-            {
-                var old = element.RenderTransform as ScaleTransform;
-                if (old == null || old.IsFrozen) return;
-                if (!Ui.Live(element)) { old.BeginAnimation(ScaleTransform.ScaleXProperty, null); old.BeginAnimation(ScaleTransform.ScaleYProperty, null); old.ScaleX = old.ScaleY = 1; return; }
-                var back = new DoubleAnimation(1, Ms(Tokens.Motion.BaseMs)) { EasingFunction = Out() };
-                old.BeginAnimation(ScaleTransform.ScaleXProperty, back);
-                old.BeginAnimation(ScaleTransform.ScaleYProperty, back);
-                return;
-            }
-            if (!Ui.Live(element)) return;
-            var scale = new ScaleTransform(1, 1);
-            element.RenderTransformOrigin = new Point(0.5, 0.5);
-            element.RenderTransform = scale;
-            var a = new DoubleAnimation(1, 1.07, Ms(850)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut } };
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, a);
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, a);
+            if (!on || !Ui.Live(element)) { element.BeginAnimation(UIElement.OpacityProperty, null); element.Opacity = 1; return; }
+            element.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(1, 0.55, Ms(900)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut } });
         }
 
         // Мерцание: точка состояния, пока что-то делается
@@ -654,16 +863,11 @@ namespace DevTxt
             element.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, Ms(Tokens.Motion.SlowMs)) { EasingFunction = Out() });
         }
 
-        // Дрожь: «не получилось»
+        // «Не получилось»: Windows не трясёт окна — кромка вспыхивает красным, а текст ошибки говорит остальное
         public static void Shake(FrameworkElement element)
         {
-            if (!Ui.Live(element)) return;
-            var shift = new TranslateTransform();
-            element.RenderTransform = shift;
-            var a = new DoubleAnimationUsingKeyFrames { Duration = Ms(420) };
-            double[] xs = { -8, 7, -5, 3, 0 };
-            for (int i = 0; i < xs.Length; i++) a.KeyFrames.Add(new EasingDoubleKeyFrame(xs[i], KeyTime.FromPercent((i + 1) / (double)xs.Length), new SineEase { EasingMode = EasingMode.EaseInOut }));
-            shift.BeginAnimation(TranslateTransform.XProperty, a);
+            var b = element as Border;
+            if (b != null) Glow(b, Tokens.Palette.Red);
         }
 
         // Вспышка кромки: рамка загорается цветом и гаснет — «готово»

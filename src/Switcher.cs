@@ -124,7 +124,8 @@ namespace DevTxt.Smena
 
             highlight = new Border
             {
-                CornerRadius = new CornerRadius(Tokens.Radius.Row), Background = Ui.GlassStrong, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1),
+                // Как в Alt+Tab Windows 11: выбранное окно обведено светлой рамкой в 2 точки, под ней — лёгкая заливка
+                CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Ui.Fill, BorderBrush = Ui.Label, BorderThickness = new Thickness(2),
                 RenderTransform = highlightAt, IsHitTestVisible = false, SnapsToDevicePixels = true
             };
             Content = root;

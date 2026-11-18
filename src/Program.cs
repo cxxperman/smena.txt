@@ -204,26 +204,28 @@ namespace DevTxt.Smena
     static class Tray
     {
         static System.Windows.Forms.NotifyIcon icon;
-        static System.Windows.Forms.ToolStripMenuItem pause;
 
         public static void Start(AboutWindow about, Action quit)
         {
             try
             {
-                var menu = new System.Windows.Forms.ContextMenuStrip();
-                // Настройки лежат на общей странице в core.txt; если он не запущен — окно «О программе» так и скажет
-                menu.Items.Add("Настройки", null, delegate { if (AppHub.Online) AppHub.ShowCore(); else about.ShowWindow(); });
-                pause = new System.Windows.Forms.ToolStripMenuItem("Приостановить", null, delegate { Prefs.SetPaused(!Prefs.Paused); });
-                menu.Items.Add(pause);
-                menu.Items.Add("О программе", null, delegate { about.ShowWindow(); });
-                var coreItem = new System.Windows.Forms.ToolStripMenuItem("core.txt", null, delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
-                menu.Items.Add(coreItem);
-                menu.Opening += delegate { coreItem.Text = CoreApp.Label(AppHub.Online); };
-                menu.Items.Add("Выход", null, delegate { quit(); });
                 icon = new System.Windows.Forms.NotifyIcon
                 {
                     Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location),
-                    ContextMenuStrip = menu, Visible = true
+                    Visible = true
+                };
+                // Меню Windows 11, а не серое меню WinForms. Настройки лежат на общей странице в core.txt;
+                // если он не запущен — окно «О программе» так и скажет
+                icon.MouseUp += delegate(object s, System.Windows.Forms.MouseEventArgs e)
+                {
+                    if (e.Button != System.Windows.Forms.MouseButtons.Right) return;
+                    NativeMenu.Show(
+                        new NativeMenu.Item("Настройки", delegate { if (AppHub.Online) AppHub.ShowCore(); else about.ShowWindow(); }),
+                        new NativeMenu.Item("Приостановить", delegate { Prefs.SetPaused(!Prefs.Paused); }) { Check = Prefs.Paused },
+                        new NativeMenu.Item("О программе", about.ShowWindow),
+                        new NativeMenu.Item(CoreApp.Label(AppHub.Online), delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); }),
+                        NativeMenu.Item.Separator,
+                        new NativeMenu.Item("Выход", quit));
                 };
                 icon.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e) { if (e.Button == System.Windows.Forms.MouseButtons.Left) about.ShowWindow(); };
                 Prefs.Changed += Render;
@@ -235,7 +237,6 @@ namespace DevTxt.Smena
         static void Render()
         {
             if (icon == null) return;
-            pause.Checked = Prefs.Paused;
             icon.Text = Program.Id + ".txt" + (Prefs.Paused ? " — приостановлено" : "");
         }
 
