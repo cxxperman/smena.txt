@@ -56,6 +56,9 @@ namespace DevTxt.Smena
         [STAThread]
         static int Main(string[] args)
         {
+            // Переключатель — прозрачное окно во весь экран: Windows перерисовывает его целиком через процессор.
+            // На частоте монитора (180 Гц и выше) он не успевает и мерцает — остаёмся на 60 кадрах, как WPF задумал.
+            Ui.AllowSmooth = false;
             bool demo = Has(args, "--demo"), headless = Has(args, "--headless"), probe = Has(args, "--probe");
             string shot = Arg(args, "--shot");
             if (Has(args, "--selftest")) return SelfTest.Run();

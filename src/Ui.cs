@@ -27,9 +27,12 @@ namespace DevTxt
         [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
         [DllImport("gdi32.dll")] static extern int GetDeviceCaps(IntPtr dc, int index);
         static bool smooth;
+        // false — оставить 60 кадров. Нужно приложениям с большими прозрачными окнами (переключатель smena на весь
+        // экран): такие окна Windows перерисовывает целиком через процессор, и 180 раз в секунду он не успевает — мерцает.
+        public static bool AllowSmooth = true;
         public static void Smooth()
         {
-            if (smooth) return;
+            if (smooth || !AllowSmooth) return;
             smooth = true;
             try
             {
