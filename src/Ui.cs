@@ -21,6 +21,27 @@ namespace DevTxt
         public static readonly FontFamily TextFont = new FontFamily(Tokens.Font.Text), DisplayFont = new FontFamily(Tokens.Font.Display);
         public static readonly FontFamily IconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
 
+        // Плавность: WPF по умолчанию считает анимации на 60 кадрах, даже если монитор быстрее, — на 144 Гц движение
+        // рвётся. Поднимаем до частоты монитора, один раз на всё приложение, до первой анимации.
+        [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+        [DllImport("gdi32.dll")] static extern int GetDeviceCaps(IntPtr dc, int index);
+        static bool smooth;
+        public static void Smooth()
+        {
+            if (smooth) return;
+            smooth = true;
+            try
+            {
+                IntPtr dc = GetDC(IntPtr.Zero);
+                int hz = GetDeviceCaps(dc, 116);   // VREFRESH
+                ReleaseDC(IntPtr.Zero, dc);
+                if (hz < 60 || hz > 360) hz = 60;
+                Timeline.DesiredFrameRateProperty.OverrideMetadata(typeof(Timeline), new FrameworkPropertyMetadata(hz));
+            }
+            catch { }
+        }
+
         // Цвета темы. Кисти общие и не заморожены: когда Windows переключает светлую и тёмную тему,
         // ApplyTheme перекрашивает их на месте — и всё, что ими нарисовано, меняется само.
         public static readonly Brush Bg = Live(Tokens.Dark.Bg), Label = Live(Tokens.Dark.Label), Label2 = Live(Tokens.Dark.Label2), Label3 = Live(Tokens.Dark.Label3);
@@ -228,6 +249,27 @@ namespace DevTxt
         public static Canvas Backdrop() { return Backdrop(0, 0); }
         public static Canvas Backdrop(double width, double height) { return new Canvas { IsHitTestVisible = false, Background = Bg, Tag = "dt-backdrop" }; }
 
+        // Подпись dev.txt поверх Mica: тёплое оранжевое свечение из левого верхнего угла — одно во всех окнах экосистемы
+        public static Canvas Signature()
+        {
+            var glow = new Canvas { IsHitTestVisible = false };
+            var fill = new RadialGradientBrush();
+            fill.GradientStops.Add(new GradientStop(Alpha(Tokens.Palette.Brand, 0.20), 0));
+            fill.GradientStops.Add(new GradientStop(Alpha(Tokens.Palette.Brand, 0.07), 0.5));
+            fill.GradientStops.Add(new GradientStop(Alpha(Tokens.Palette.Brand, 0), 1));
+            fill.Freeze();
+            var e = new Ellipse { Width = 1100, Height = 900, Fill = fill };
+            Canvas.SetLeft(e, -520); Canvas.SetTop(e, -520);
+            glow.Children.Add(e);
+            return glow;
+        }
+
+        // Значок из Segoe Fluent Icons — как в самой Windows 11
+        public static TextBlock Glyph(string code)
+        {
+            return new TextBlock { Text = code, FontFamily = IconFont, FontSize = 16, Foreground = Label, TextAlignment = TextAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        }
+
         // ───────── Окно как в Windows 11 ─────────
         [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
 
@@ -250,6 +292,7 @@ namespace DevTxt
         // Шапку окно рисует само; перетаскивать — DragMove, кнопки — CaptionButtons.
         public static void Native(Window w, bool resizable)
         {
+            Smooth();
             w.WindowStyle = WindowStyle.SingleBorderWindow;
             w.ResizeMode = resizable ? ResizeMode.CanResize : ResizeMode.CanMinimize;
             System.Windows.Shell.WindowChrome.SetWindowChrome(w, new System.Windows.Shell.WindowChrome
@@ -678,6 +721,146 @@ namespace DevTxt
         }
     }
 
+    // Каркас окна любого приложения dev.txt — один для всех, чтобы они читались как одна семья.
+    // Как «Параметры» Windows 11: слева значок и имя продукта, под ними разделы; справа заголовок раздела,
+    // содержимое и нижняя строка. Поверх Mica — общая подпись dev.txt: тёплое свечение в левом верхнем углу.
+    //   var shell = new NavShell(window, Sprite, "core", "версия 0.3.0", Close);
+    //   int apps = shell.Add("Приложения", Ui.Glyph(""));   shell.Changed = delegate(int i) { … };
+    //   shell.Body.Children.Add(page);   Content = shell.Root;
+    class NavShell
+    {
+        public const double PaneW = 260;
+        public readonly Grid Root;
+        public readonly Grid Body = new Grid();                       // страницы — сюда
+        public readonly DockPanel Bottom = new DockPanel { LastChildFill = true, Height = 64, Margin = new Thickness(32, 0, 32, 4) };   // строка состояния и кнопки
+        public readonly TextBlock Status = Ui.T("", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);   // внизу слева, под разделами
+        public Action<int> Changed;
+        readonly FrameworkElement pane;
+        readonly ColumnDefinition paneCol = new ColumnDefinition { Width = new GridLength(PaneW) };
+        readonly StackPanel nav = new StackPanel();
+        readonly System.Collections.Generic.List<Border> items = new System.Collections.Generic.List<Border>();
+        readonly System.Collections.Generic.List<Border> pills = new System.Collections.Generic.List<Border>();
+        readonly TextBlock title = Ui.T("", Tokens.Size.Display, Ui.Label, FontWeights.SemiBold), subtitle = Ui.T("", Tokens.Size.Body, Ui.Label2, FontWeights.Normal);
+        readonly FrameworkElement titleBox;
+        int selected = -1;
+
+        public NavShell(Window w, string[] sprite, string name, string version, Action close)
+        {
+            Root = new Grid { Background = Ui.Bg, ClipToBounds = true };
+            Root.Children.Add(Ui.Backdrop());
+            Root.Children.Add(Ui.Signature());
+            var main = new Grid();
+            main.ColumnDefinitions.Add(paneCol);
+            main.ColumnDefinitions.Add(new ColumnDefinition());
+            Root.Children.Add(main);
+            MouseButtonEventHandler drag = delegate(object s, MouseButtonEventArgs e) { if (e.ButtonState == MouseButtonState.Pressed && e.ClickCount == 1) try { w.DragMove(); } catch { } };
+
+            // Слева: значок и имя продукта, версия, разделы, строка состояния
+            var mark = Ui.Sprite(sprite, 30);
+            mark.VerticalAlignment = VerticalAlignment.Center;
+            var brand = Ui.Brand(name, Tokens.Size.Title, FontWeights.SemiBold);
+            brand.Margin = new Thickness(12, 0, 0, 1); brand.VerticalAlignment = VerticalAlignment.Center;
+            var ver = Ui.T(version ?? "", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
+            ver.Margin = new Thickness(42, 2, 0, 0);
+            var head = new StackPanel { Margin = new Thickness(20, 22, 16, 18), Background = Brushes.Transparent, Children = { new StackPanel { Orientation = Orientation.Horizontal, Children = { mark, brand } }, ver } };
+            head.MouseLeftButtonDown += drag;
+            Status.TextWrapping = TextWrapping.Wrap; Status.Margin = new Thickness(20, 8, 20, 18);
+            var navView = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = nav, Focusable = false, Padding = new Thickness(8, 0, 8, 0) };
+            var left = new DockPanel { LastChildFill = true };
+            DockPanel.SetDock(head, Dock.Top); left.Children.Add(head);
+            DockPanel.SetDock(Status, Dock.Bottom); left.Children.Add(Status);
+            left.Children.Add(navView);
+            pane = left;
+            main.Children.Add(left);
+
+            // Справа: заголовок раздела (за него окно перетаскивается), кнопки окна, содержимое, нижняя строка
+            var top = new Grid { Background = Brushes.Transparent, Height = 104 };
+            top.MouseLeftButtonDown += drag;
+            subtitle.Margin = new Thickness(0, 2, 0, 0);
+            titleBox = new StackPanel { Margin = new Thickness(32, 34, 160, 0), Children = { title, subtitle } };
+            top.Children.Add(titleBox);
+            top.Children.Add(Ui.CaptionButtons(w, close));
+            var right = new DockPanel { LastChildFill = true };
+            DockPanel.SetDock(top, Dock.Top); right.Children.Add(top);
+            DockPanel.SetDock(Bottom, Dock.Bottom); right.Children.Add(Bottom);
+            right.Children.Add(Body);
+            Grid.SetColumn(right, 1);
+            main.Children.Add(right);
+        }
+
+        // Заголовок группы разделов («Настройки», «Приложения»)
+        public void Header(string text)
+        {
+            var t = Ui.T(text, Tokens.Size.Caption, Ui.Label3, FontWeights.SemiBold);
+            t.Margin = new Thickness(12, nav.Children.Count == 0 ? 4 : 18, 0, 6);
+            nav.Children.Add(t);
+        }
+
+        // Раздел: значок (пиксельный или Segoe Fluent Icons) и подпись. Возвращает номер раздела.
+        public int Add(string label, FrameworkElement icon)
+        {
+            int n = items.Count;
+            var pill = new Border { Width = 3, Height = 16, CornerRadius = new CornerRadius(1.5), Background = Ui.AccentBrush, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Hidden };
+            var text = Ui.T(label, Tokens.Size.Body, Ui.Label, FontWeights.Normal);
+            text.VerticalAlignment = VerticalAlignment.Center; text.Margin = new Thickness(14, 0, 0, 1);
+            var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(14, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+            if (icon != null) { icon.Width = 20; icon.Height = 20; icon.VerticalAlignment = VerticalAlignment.Center; row.Children.Add(icon); }
+            else text.Margin = new Thickness(0, 0, 0, 1);
+            row.Children.Add(text);
+            var b = new Border { Height = 38, CornerRadius = new CornerRadius(Tokens.Radius.Control), Margin = new Thickness(0, 1, 0, 1), Background = Brushes.Transparent, Child = new Grid { Children = { row, pill } } };
+            b.MouseEnter += delegate { b.Background = n == selected ? Ui.Fill2 : Ui.Fill; };
+            b.MouseLeave += delegate { b.Background = n == selected ? Ui.Fill : Brushes.Transparent; };
+            b.MouseLeftButtonUp += delegate { Pick(n); };
+            Ui.Keyboard(b, delegate { Pick(n); });
+            items.Add(b); pills.Add(pill);
+            nav.Children.Add(b);
+            return n;
+        }
+
+        public void Clear() { nav.Children.Clear(); items.Clear(); pills.Clear(); selected = -1; }
+
+        void Pick(int n)
+        {
+            if (n == selected) return;
+            Selected = n;
+            if (Changed != null) Changed(n);
+        }
+
+        // Выбранный раздел: заливка и полоска цвета акцента слева, как в навигации Windows 11
+        public int Selected
+        {
+            get { return selected; }
+            set
+            {
+                selected = value;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    bool on = i == selected;
+                    items[i].Background = on ? (items[i].IsMouseOver ? Ui.Fill2 : Ui.Fill) : (items[i].IsMouseOver ? Ui.Fill : Brushes.Transparent);
+                    bool was = pills[i].Visibility == Visibility.Visible;
+                    pills[i].Visibility = on ? Visibility.Visible : Visibility.Hidden;
+                    if (on && !was) Motion.Pop(pills[i]);
+                }
+            }
+        }
+
+        public void Title(string text, string sub)
+        {
+            Motion.Swap(title, text ?? "");
+            Motion.Swap(subtitle, sub ?? "");
+            subtitle.Visibility = string.IsNullOrEmpty(sub) ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        // Без левой панели и заголовка — например, установщик на первом запуске
+        public void Chrome(bool on)
+        {
+            paneCol.Width = new GridLength(on ? PaneW : 0);
+            pane.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+            titleBox.Visibility = on ? Visibility.Visible : Visibility.Hidden;
+            Bottom.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
     // Меню Windows 11 — настоящее системное: скруглённое, на матовом стекле, светлое или тёмное по теме.
     // Для значка в трее и любых других контекстных меню вместо меню WinForms (те выглядят как в Windows 7).
     static class NativeMenu
@@ -861,6 +1044,16 @@ namespace DevTxt
             element.RenderTransform = shift;
             shift.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(dx, 0, Ms(Tokens.Motion.SlowMs)) { EasingFunction = Out() });
             element.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, Ms(Tokens.Motion.SlowMs)) { EasingFunction = Out() });
+        }
+
+        // Вход страницы, как в «Параметрах» Windows 11: новая страница поднимается снизу и проявляется
+        public static void Enter(FrameworkElement element)
+        {
+            if (!Ui.Live(element)) return;
+            var shift = new TranslateTransform(0, 32);
+            element.RenderTransform = shift;
+            shift.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(32, 0, Ms(Tokens.Motion.SlowMs)) { EasingFunction = Out() });
+            element.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0, 1, Ms(Tokens.Motion.BaseMs)) { EasingFunction = Out() });
         }
 
         // «Не получилось»: Windows не трясёт окна — кромка вспыхивает красным, а текст ошибки говорит остальное

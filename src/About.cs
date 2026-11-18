@@ -14,7 +14,7 @@ namespace DevTxt.Smena
 {
     class AboutWindow : Window
     {
-        const double W = 560, H = 332;
+        const double W = 880, H = 560;
 
         readonly bool demo;
         readonly Status hook = new Status(), hub = new Status();
@@ -49,27 +49,14 @@ namespace DevTxt.Smena
 
         FrameworkElement Build()
         {
-            var root = new Grid { Background = Ui.Bg, Width = W, Height = H, ClipToBounds = true };
-            root.Children.Add(Ui.Backdrop(W, H));
-            var layout = new DockPanel { LastChildFill = true };
-            root.Children.Add(layout);
-
-            // Шапка: за неё окно перетаскивается
-            var header = new Grid { Height = 92, Background = Brushes.Transparent };
-            header.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { if (e.ButtonState == MouseButtonState.Pressed) try { DragMove(); } catch { } };
-            var mark = Ui.Sprite(Program.Sprite, 40);
-            mark.VerticalAlignment = VerticalAlignment.Center;
-            var title = Ui.Brand(Program.Id, Tokens.Size.Display, FontWeights.Bold);
-            title.Margin = new Thickness(10, 0, 0, 2); title.VerticalAlignment = VerticalAlignment.Center;
-            header.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(32, 22, 0, 0), VerticalAlignment = VerticalAlignment.Center, Children = { mark, title } });
-            header.Children.Add(Ui.CaptionButtons(this, Hide));   // кнопки окна как у Windows 11
-            DockPanel.SetDock(header, System.Windows.Controls.Dock.Top);
-            layout.Children.Add(header);
-
-            var footer = Ui.T("версия " + Program.VersionText + " · dev.txt™", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
-            footer.Margin = new Thickness(32, 0, 32, 24);
-            DockPanel.SetDock(footer, System.Windows.Controls.Dock.Bottom);
-            layout.Children.Add(footer);
+            // Общий каркас dev.txt: слева значок, имя и раздел, справа заголовок и содержимое
+            var shell = new NavShell(this, Program.Sprite, Program.Id, "версия " + Program.VersionText, Hide);
+            shell.Add("Главное", Ui.Glyph(""));
+            shell.Selected = 0;
+            shell.Title("Переключение окон", "Alt+Tab с живыми превью вместо системного");
+            var footer = Ui.T("dev.txt™", Tokens.Size.Caption, Ui.Label3, FontWeights.Normal);
+            footer.VerticalAlignment = VerticalAlignment.Center;
+            shell.Bottom.Children.Add(footer);
 
             // Блок: что с Alt+Tab и кнопка «Показать»; под чертой — связь с core.txt, где лежат настройки
             var text = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
@@ -83,7 +70,7 @@ namespace DevTxt.Smena
             first.Children.Add(tryBtn.Root);
             first.Children.Add(text);
 
-            var line = new Border { Height = 1, Background = Ui.Solid(Tokens.Dark.Separator), Margin = new Thickness(0, 16, 0, 16) };
+            var line = new Border { Height = 1, Background = Ui.Separator, Margin = new Thickness(0, 16, 0, 16) };
 
             var second = new DockPanel { LastChildFill = true };
             coreBtn.Root.VerticalAlignment = VerticalAlignment.Center;
@@ -96,8 +83,8 @@ namespace DevTxt.Smena
             var block = Ui.Block(new StackPanel { Children = { first, line, second } }, true);
             block.Margin = new Thickness(32, 0, 32, 0);
             block.VerticalAlignment = VerticalAlignment.Top;
-            layout.Children.Add(block);
-            return root;
+            shell.Body.Children.Add(block);
+            return shell.Root;
         }
 
         FrameworkElement WindowButton(string glyph, string tip, Action click)
