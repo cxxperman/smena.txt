@@ -222,13 +222,15 @@ namespace DevTxt.Smena
                 icon.MouseUp += delegate(object s, System.Windows.Forms.MouseEventArgs e)
                 {
                     if (e.Button != System.Windows.Forms.MouseButtons.Right) return;
-                    NativeMenu.Show(
-                        new NativeMenu.Item("Настройки", delegate { if (AppHub.Online) AppHub.ShowCore(); else about.ShowWindow(); }),
-                        new NativeMenu.Item("Приостановить", delegate { Prefs.SetPaused(!Prefs.Paused); }) { Check = Prefs.Paused },
-                        new NativeMenu.Item("О программе", about.ShowWindow),
-                        new NativeMenu.Item(CoreApp.Label(AppHub.Online), delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); }),
-                        NativeMenu.Item.Separator,
-                        new NativeMenu.Item("Выход", quit));
+                    var menu = new PopMenu();
+                    menu.Brand(Program.Sprite, Program.Id);
+                    menu.Item("Открыть smena.txt", false, about.ShowWindow);
+                    menu.Item("Приостановить", Prefs.Paused, delegate { Prefs.SetPaused(!Prefs.Paused); });
+                    menu.Item("Настройки", false, delegate { if (AppHub.Online) AppHub.ShowCore(); else about.ShowWindow(); });
+                    menu.Item(CoreApp.Label(AppHub.Online), false, delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
+                    menu.Line();
+                    menu.Item("Выход", false, quit);
+                    menu.ShowAtCursor();
                 };
                 icon.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e) { if (e.Button == System.Windows.Forms.MouseButtons.Left) about.ShowWindow(); };
                 Prefs.Changed += Render;

@@ -267,6 +267,36 @@ namespace DevTxt
             return glow;
         }
 
+        // Общие стили окна: подсказки и полосы прокрутки как в Windows 11. Вызывается один раз: Ui.Styles(app.Resources).
+        //   • подсказка — тёмная панель с углами 4 и обводкой, длинный текст переносится;
+        //   • полоса прокрутки — тонкая, без стрелок, видна только когда есть что листать.
+        public static void Styles(ResourceDictionary res)
+        {
+            try
+            {
+                string ns = "xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'";
+                res[typeof(ToolTip)] = System.Windows.Markup.XamlReader.Parse(
+                    "<Style " + ns + " TargetType='ToolTip'><Setter Property='OverridesDefaultStyle' Value='True'/><Setter Property='HasDropShadow' Value='False'/>" +
+                    "<Setter Property='Foreground' Value='White'/><Setter Property='FontSize' Value='" + Tokens.Size.Caption + "'/><Setter Property='FontFamily' Value='" + Tokens.Font.Text + "'/>" +
+                    "<Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ToolTip'><Grid Margin='8,4,8,12'>" +
+                    "<Border CornerRadius='" + Tokens.Radius.Tip + "' Background='#FF2C2C2C'><Border.Effect><DropShadowEffect BlurRadius='8' ShadowDepth='2' Direction='270' Opacity='0.3' Color='Black'/></Border.Effect></Border>" +
+                    "<Border CornerRadius='" + Tokens.Radius.Tip + "' BorderThickness='1' BorderBrush='#18FFFFFF' Padding='9,5,9,6' MaxWidth='320'>" +
+                    "<ContentPresenter><ContentPresenter.Resources><Style TargetType='TextBlock'><Setter Property='TextWrapping' Value='Wrap'/></Style></ContentPresenter.Resources></ContentPresenter>" +
+                    "</Border></Grid></ControlTemplate></Setter.Value></Setter></Style>");
+                string thumb = "<Thumb><Thumb.Template><ControlTemplate TargetType='Thumb'><Border x:Name='b' CornerRadius='1.5' Background='#80909090' Margin='{0}'/>" +
+                    "<ControlTemplate.Triggers><Trigger Property='IsMouseOver' Value='True'><Setter TargetName='b' Property='Background' Value='#C0909090'/></Trigger></ControlTemplate.Triggers></ControlTemplate></Thumb.Template></Thumb>";
+                res[typeof(System.Windows.Controls.Primitives.ScrollBar)] = System.Windows.Markup.XamlReader.Parse(
+                    "<Style " + ns + " TargetType='ScrollBar'><Setter Property='OverridesDefaultStyle' Value='True'/><Setter Property='Background' Value='Transparent'/>" +
+                    "<Setter Property='Width' Value='10'/><Setter Property='MinWidth' Value='10'/>" +
+                    "<Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ScrollBar'><Grid Background='Transparent'><Track x:Name='PART_Track' IsDirectionReversed='True'><Track.Thumb>" +
+                    string.Format(thumb, "4,2,3,2") + "</Track.Thumb></Track></Grid></ControlTemplate></Setter.Value></Setter>" +
+                    "<Style.Triggers><Trigger Property='Orientation' Value='Horizontal'><Setter Property='Width' Value='Auto'/><Setter Property='MinWidth' Value='0'/><Setter Property='Height' Value='10'/><Setter Property='MinHeight' Value='10'/>" +
+                    "<Setter Property='Template'><Setter.Value><ControlTemplate TargetType='ScrollBar'><Grid Background='Transparent'><Track x:Name='PART_Track'><Track.Thumb>" +
+                    string.Format(thumb, "2,4,2,3") + "</Track.Thumb></Track></Grid></ControlTemplate></Setter.Value></Setter></Trigger></Style.Triggers></Style>");
+            }
+            catch { }
+        }
+
         // Значок из Segoe Fluent Icons — как в самой Windows 11
         public static TextBlock Glyph(string code)
         {
@@ -498,6 +528,44 @@ namespace DevTxt
         }
     }
 
+    // Поле ввода Windows 11 (поиск): высота 32, углы 4, значок лупы, подсказка в пустом поле, крестик для очистки;
+    // в фокусе снизу полоска цвета акцента. Changed приходит не на каждую букву, а когда человек остановился (120 мс).
+    // Esc очищает поле.
+    class Field
+    {
+        public readonly Border Root;
+        public readonly TextBox Box;
+        public Action<string> Changed;
+        readonly System.Windows.Threading.DispatcherTimer wait = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
+
+        public Field(string hint)
+        {
+            Box = new TextBox { Background = Brushes.Transparent, Foreground = Ui.Label, CaretBrush = Ui.Label, BorderThickness = new Thickness(0), FontSize = Tokens.Size.Body, FontFamily = Ui.TextFont, VerticalContentAlignment = VerticalAlignment.Center, Padding = new Thickness(32, 0, 30, 1) };
+            var icon = Ui.Glyph("\uE721");
+            icon.FontSize = Tokens.Size.Caption; icon.Foreground = Ui.Label2; icon.HorizontalAlignment = HorizontalAlignment.Left; icon.Margin = new Thickness(11, 0, 0, 0); icon.IsHitTestVisible = false;
+            var ghost = Ui.T(hint, Tokens.Size.Body, Ui.Label3, FontWeights.Normal);
+            ghost.Margin = new Thickness(34, 0, 0, 1); ghost.VerticalAlignment = VerticalAlignment.Center; ghost.IsHitTestVisible = false;
+            var clear = Ui.Glyph("\uE711");
+            clear.FontSize = Tokens.Size.Micro; clear.Foreground = Ui.Label2; clear.HorizontalAlignment = HorizontalAlignment.Right; clear.Margin = new Thickness(0, 0, 4, 0);
+            clear.Width = 24; clear.Height = 24; clear.Padding = new Thickness(0, 6, 0, 0); clear.Background = Brushes.Transparent; clear.Visibility = Visibility.Collapsed; clear.ToolTip = "Очистить";
+            var line = new Border { Height = 2, VerticalAlignment = VerticalAlignment.Bottom, Background = Ui.AccentBrush, CornerRadius = new CornerRadius(0, 0, Tokens.Radius.Control, Tokens.Radius.Control), Visibility = Visibility.Hidden, IsHitTestVisible = false };
+            Root = new Border { Height = 32, CornerRadius = new CornerRadius(Tokens.Radius.Control), Background = Ui.GlassFill, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), Child = new Grid { Children = { Box, icon, ghost, clear, line } }, ClipToBounds = true };
+            wait.Tick += delegate { wait.Stop(); if (Changed != null) Changed(Box.Text); };
+            Box.TextChanged += delegate
+            {
+                ghost.Visibility = Box.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+                clear.Visibility = Box.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+                wait.Stop(); wait.Start();
+            };
+            Box.GotKeyboardFocus += delegate { line.Visibility = Visibility.Visible; };
+            Box.LostKeyboardFocus += delegate { line.Visibility = Visibility.Hidden; };
+            Box.PreviewKeyDown += delegate(object s, KeyEventArgs e) { if (e.Key == Key.Escape && Box.Text.Length > 0) { e.Handled = true; Box.Text = ""; } };
+            clear.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Box.Text = ""; Box.Focus(); };
+        }
+
+        public string Text { get { return Box.Text; } set { Box.Text = value ?? ""; } }
+    }
+
     // Полоса хода: тонкая дорожка и заливка цветом продукта
     class Progress
     {
@@ -617,8 +685,10 @@ namespace DevTxt
                 int n = i;
                 var t = new TextBlock { Text = labels[i], FontSize = Tokens.Size.Body, FontFamily = Ui.TextFont, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
                 var b = new Border { Height = 34, MinWidth = 44, CornerRadius = new CornerRadius(Tokens.Radius.Control), Padding = new Thickness(12, 0, 12, 2), Child = t, Background = Brushes.Transparent, Margin = new Thickness(i == 0 ? 0 : 2, 0, 0, 0) };
-                b.MouseEnter += delegate { b.Background = Ui.Fill; };
-                b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
+                int n = rows.Count;
+                rows.Add(b); acts.Add(action);
+                b.MouseEnter += delegate { Mark(n); };   // курсор и стрелки двигают одну и ту же подсветку
+                b.MouseLeave += delegate { if (marked == n) Mark(-1); };
                 b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Pick(n); };
                 items.Add(b);
                 strip.Children.Add(b);
@@ -861,6 +931,163 @@ namespace DevTxt
             pane.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
             titleBox.Visibility = on ? Visibility.Visible : Visibility.Hidden;
             Bottom.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        }
+    }
+
+    // Меню dev.txt — одно для значка в трее и для правого щелчка во всех приложениях: панель Windows 11 (углы 8,
+    // строки 32, подсветка с углами 4, галочка слева), со значком и именем продукта в шапке. Закрывается щелчком
+    // мимо и клавишей Esc.
+    class PopMenu : Window
+    {
+        const double Shadow = 18, RowH = 32;
+        readonly StackPanel list = new StackPanel();
+        readonly Border box;
+        bool closing;
+
+        public PopMenu()
+        {
+            Title = "dev.txt";
+            WindowStyle = WindowStyle.None;
+            AllowsTransparency = true;
+            Background = Brushes.Transparent;
+            ResizeMode = ResizeMode.NoResize;
+            ShowInTaskbar = false;
+            Topmost = true;
+            SizeToContent = SizeToContent.WidthAndHeight;
+            FontFamily = Ui.TextFont;
+            UseLayoutRounding = true;
+            TextOptions.SetTextFormattingMode(this, TextFormattingMode.Ideal);
+            box = new Border
+            {
+                Margin = new Thickness(Shadow), MinWidth = 196, CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Ui.Solid(Tokens.Dark.Menu),
+                Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = Shadow, ShadowDepth = 4, Direction = 270, Opacity = 0.4, Color = Colors.Black },
+                Child = new Border { CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Brushes.Transparent, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), Padding = new Thickness(4), Child = list }
+            };
+            Content = box;
+            Deactivated += delegate { Shut(); };
+            KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.Key == Key.Escape) { Shut(); return; }
+                if (rows.Count == 0) return;
+                if (e.Key == Key.Down || e.Key == Key.Tab) { e.Handled = true; Mark((marked + 1) % rows.Count); }
+                else if (e.Key == Key.Up) { e.Handled = true; Mark((marked + rows.Count - 1) % rows.Count); }
+                else if (e.Key == Key.Home) { e.Handled = true; Mark(0); }
+                else if (e.Key == Key.End) { e.Handled = true; Mark(rows.Count - 1); }
+                else if ((e.Key == Key.Enter || e.Key == Key.Space) && marked >= 0) { e.Handled = true; Action a = acts[marked]; Shut(); a(); }
+            };
+            Closing += delegate(object s, System.ComponentModel.CancelEventArgs e) { closing = true; };
+        }
+
+        // Доступные строки и их действия — для стрелок и Enter
+        readonly System.Collections.Generic.List<Border> rows = new System.Collections.Generic.List<Border>();
+        readonly System.Collections.Generic.List<Action> acts = new System.Collections.Generic.List<Action>();
+        int marked = -1;
+
+        void Mark(int n)
+        {
+            if (marked >= 0 && marked < rows.Count) rows[marked].Background = Brushes.Transparent;
+            marked = n;
+            if (marked >= 0 && marked < rows.Count) rows[marked].Background = Ui.Fill;
+        }
+
+        // Закрытие: меню быстро гаснет (83 мс, как у Windows) и только потом исчезает
+        void Shut()
+        {
+            if (closing) return;
+            closing = true;
+            if (!Ui.Live(box)) { Close(); return; }
+            var fade = new System.Windows.Media.Animation.DoubleAnimation(0, TimeSpan.FromMilliseconds(Tokens.Motion.PressMs));
+            fade.Completed += delegate { try { Close(); } catch { } };
+            box.BeginAnimation(UIElement.OpacityProperty, fade);
+        }
+
+        // Заголовок: название приложения или что угодно ещё
+        public void Header(UIElement what)
+        {
+            list.Children.Add(new Border { Padding = new Thickness(10, 5, 10, 6), Child = what });
+        }
+
+        public void Line()
+        {
+            list.Children.Add(new Border { Height = 1, Margin = new Thickness(-4, 4, -4, 4), Background = Ui.Separator });
+        }
+
+        // Строка меню. check — показать галочку справа; action == null — строка недоступна.
+        public void Item(string label, bool check, Action action)
+        {
+            bool enabled = action != null;
+            var text = Ui.T(label, Tokens.Size.Body, enabled ? Ui.Label : Ui.Label3, FontWeights.Normal);
+            text.VerticalAlignment = VerticalAlignment.Center;
+            var row = new DockPanel { LastChildFill = true };
+            // галочка — слева, как в меню Windows; место под неё есть у всех строк, чтобы подписи стояли ровно
+            var mark = new TextBlock { Text = check ? "\uE73E" : "", FontFamily = Ui.IconFont, FontSize = Tokens.Size.Caption, Foreground = Ui.Label, VerticalAlignment = VerticalAlignment.Center, Width = 28 };
+            DockPanel.SetDock(mark, System.Windows.Controls.Dock.Left);
+            row.Children.Add(mark);
+            row.Children.Add(text);
+            var b = new Border { Height = RowH, CornerRadius = new CornerRadius(Tokens.Radius.Tip), Padding = new Thickness(10, 0, 10, 1), Background = Brushes.Transparent, Child = row };
+            if (enabled)
+            {
+                b.MouseEnter += delegate { b.Background = Ui.Fill; };
+                b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
+                b.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                {
+                    e.Handled = true;
+                    Shut();
+                    action();
+                };
+            }
+            list.Children.Add(b);
+        }
+
+        // Показывает меню над точкой (cx, bottom) — в единицах WPF, в координатах экрана; за края рабочей области не вылезает
+        public void ShowAbove(double cx, double bottom, Rect work)
+        {
+            box.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double w = box.DesiredSize.Width, h = box.DesiredSize.Height;
+            Left = Math.Max(work.Left - Shadow + 4, Math.Min(work.Right + Shadow - 4 - w, cx - w / 2));
+            Top = Math.Max(work.Top, bottom - h + Shadow);
+            Show();
+            Motion.GrowFrom(box, new Point(0.5, 1));   // меню вырастает из того, по чему щёлкнули
+            Activate();
+        }
+
+        // Шапка меню: значок и имя продукта — одна у всех приложений dev.txt
+        public void Brand(string[] sprite, string name)
+        {
+            var mark = Ui.Sprite(sprite, 18);
+            var brand = Ui.Brand(name, Tokens.Size.Body, FontWeights.SemiBold);
+            brand.Margin = new Thickness(8, 0, 0, 1); brand.VerticalAlignment = VerticalAlignment.Center;
+            Header(new StackPanel { Orientation = Orientation.Horizontal, Children = { mark, brand } });
+            Line();
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)] struct POINT { public int X, Y; }
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr hwnd);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int ReleaseDC(IntPtr hwnd, IntPtr dc);
+        [System.Runtime.InteropServices.DllImport("gdi32.dll")] static extern int GetDeviceCaps(IntPtr dc, int index);
+        [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
+
+        // Показывает меню у курсора — для значка в трее: над курсором, не вылезая за края экрана
+        public void ShowAtCursor()
+        {
+            POINT p;
+            GetCursorPos(out p);
+            IntPtr dc = GetDC(IntPtr.Zero);
+            double k = GetDeviceCaps(dc, 88) / 96.0;   // LOGPIXELSX
+            ReleaseDC(IntPtr.Zero, dc);
+            if (k <= 0) k = 1;
+            double x = p.X / k, y = p.Y / k;
+            box.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double w = box.DesiredSize.Width, h = box.DesiredSize.Height;
+            double left = SystemParameters.VirtualScreenLeft, top = SystemParameters.VirtualScreenTop;
+            double right = left + SystemParameters.VirtualScreenWidth;
+            Left = Math.Max(left - Shadow + 4, Math.Min(right + Shadow - 4 - w, x - w + Shadow + 8));
+            Top = y - h + Shadow - 4 >= top ? y - h + Shadow - 4 : y - Shadow + 4;
+            Show();
+            Motion.GrowFrom(box, new Point(1, 1));   // вырастает от курсора
+            Activate();
+            try { SetForegroundWindow(new System.Windows.Interop.WindowInteropHelper(this).Handle); } catch { }   // иначе меню трея не закроется щелчком мимо
         }
     }
 
