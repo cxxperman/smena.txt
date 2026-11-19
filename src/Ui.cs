@@ -687,7 +687,8 @@ namespace DevTxt
                 var b = new Border { Height = 34, MinWidth = 44, CornerRadius = new CornerRadius(Tokens.Radius.Control), Padding = new Thickness(12, 0, 12, 2), Child = t, Background = Brushes.Transparent, Margin = new Thickness(i == 0 ? 0 : 2, 0, 0, 0) };
                 b.MouseEnter += delegate { b.Background = Ui.Fill; };
                 b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
-                b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Pick(n); };
+                b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; b.Background = Ui.Press; Pick(n); };
+                b.MouseLeftButtonUp += delegate { b.Background = b.IsMouseOver ? Ui.Fill : Brushes.Transparent; };
                 items.Add(b);
                 strip.Children.Add(b);
             }
@@ -761,7 +762,23 @@ namespace DevTxt
             knob.MouseEnter += delegate { dot.Width = dot.Height = 14; };
             knob.MouseLeave += delegate { dot.Width = dot.Height = 12; };
             Root = new Grid { Width = W, Height = 24, Background = Brushes.Transparent, Cursor = Cursors.Hand, Children = { track, fill, knob } };
-            Root.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Root.CaptureMouse(); Move(e.GetPosition(Root).X); };
+            Root.Focusable = true;
+            Root.FocusVisualStyle = Ui.Focus;
+            // С клавиатуры: стрелки — на шаг, Home и End — в края; о новом значении сообщаем сразу
+            Root.KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                double d = this.step > 0 ? this.step : (this.max - this.min) / 20, to = this.value;
+                if (e.Key == Key.Left || e.Key == Key.Down) to -= d;
+                else if (e.Key == Key.Right || e.Key == Key.Up) to += d;
+                else if (e.Key == Key.Home) to = this.min;
+                else if (e.Key == Key.End) to = this.max;
+                else return;
+                e.Handled = true;
+                double was = this.value;
+                Value = to;
+                if (this.value != was && this.changed != null) this.changed(this.value);
+            };
+            Root.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Root.Focus(); Root.CaptureMouse(); Move(e.GetPosition(Root).X); };
             Root.MouseMove += delegate(object s, MouseEventArgs e) { if (Root.IsMouseCaptured) Move(e.GetPosition(Root).X); };
             Root.MouseLeftButtonUp += delegate
             {
@@ -881,7 +898,8 @@ namespace DevTxt
             var b = new Border { Height = 38, CornerRadius = new CornerRadius(Tokens.Radius.Control), Margin = new Thickness(0, 1, 0, 1), Background = Brushes.Transparent, Child = new Grid { Children = { row, pill } } };
             b.MouseEnter += delegate { b.Background = n == selected ? Ui.Fill2 : Ui.Fill; };
             b.MouseLeave += delegate { b.Background = n == selected ? Ui.Fill : Brushes.Transparent; };
-            b.MouseLeftButtonUp += delegate { Pick(n); };
+            b.MouseLeftButtonDown += delegate { b.Background = Ui.Press; };   // нажатие видно сразу, как в навигации Windows
+            b.MouseLeftButtonUp += delegate { Pick(n); b.Background = n == selected ? Ui.Fill : Brushes.Transparent; };
             Ui.Keyboard(b, delegate { Pick(n); });
             items.Add(b); pills.Add(pill);
             nav.Children.Add(b);

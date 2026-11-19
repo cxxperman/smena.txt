@@ -154,19 +154,20 @@ namespace DevTxt.Smena
                     Microsoft.Win32.SystemEvents.PowerModeChanged += delegate(object s, Microsoft.Win32.PowerModeChangedEventArgs e) { if (e.Mode == Microsoft.Win32.PowerModes.Resume) Hook.Restart(); };
                     Microsoft.Win32.SystemEvents.SessionSwitch += delegate(object s, Microsoft.Win32.SessionSwitchEventArgs e) { if (e.Reason == Microsoft.Win32.SessionSwitchReason.SessionUnlock) Hook.Restart(); };
                 }
+                // Сторож следит, какое окно впереди, — из этого складывается порядок окон «от недавнего к давнему».
+                // И ещё: если при зажатом Alt открылся системный переключатель, значит, мы клавишу не получили.
+                // Записываем почему и, если перехватчик сняла Windows, сразу ставим его заново.
+                Win.Watch(delegate(IntPtr before)
+                {
+                    if (!Hook.Allowed || !Prefs.Replace || Prefs.Paused || !Hook.Installed) return;
+                    string who = Win.Describe(before);
+                    if (Prefs.Games && Win.Fullscreen(before)) { Journal.Write("Alt+Tab отдан Windows: впереди окно на весь экран — " + who + ". Это настройка «Не вмешиваться в играх»"); return; }
+                    if (Win.Elevated(before)) { Journal.Write("Alt+Tab не перехвачен: впереди окно с правами администратора — " + who + ". В таких окнах Windows не даёт перехватывать клавиши"); return; }
+                    Journal.Write("Alt+Tab не перехвачен: Windows сняла перехватчик клавиш (впереди " + who + "). Поставлен заново");
+                    Hook.Restart();
+                });
                 if (Hook.Allowed)
                 {
-                    // Сторож: если при зажатом Alt открылся системный переключатель, значит, мы клавишу не получили.
-                    // Записываем почему и, если перехватчик сняла Windows, сразу ставим его заново.
-                    Win.WatchSystemSwitcher(delegate(IntPtr before)
-                    {
-                        if (!Prefs.Replace || Prefs.Paused || !Hook.Installed) return;
-                        string who = Win.Describe(before);
-                        if (Prefs.Games && Win.Fullscreen(before)) { Journal.Write("Alt+Tab отдан Windows: впереди окно на весь экран — " + who + ". Это настройка «Не вмешиваться в играх»"); return; }
-                        if (Win.Elevated(before)) { Journal.Write("Alt+Tab не перехвачен: впереди окно с правами администратора — " + who + ". В таких окнах Windows не даёт перехватывать клавиши"); return; }
-                        Journal.Write("Alt+Tab не перехвачен: Windows сняла перехватчик клавиш (впереди " + who + "). Поставлен заново");
-                        Hook.Restart();
-                    });
                     // И без всякого сбоя перехватчик время от времени ставится заново — без перерыва, незаметно
                     var refresh = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
                     refresh.Tick += delegate { if (!switcher.IsOpen) Hook.Refresh(); };

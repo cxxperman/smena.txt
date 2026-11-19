@@ -70,6 +70,16 @@ namespace DevTxt.Smena
             return true;
         }
 
+        // Впереди может быть диалог или всплывающее окно программы, которого в списке нет: тогда «текущее окно» — его
+        // владелец. chain — переднее окно и его владельцы по порядку; возвращает первое из них, что есть в списке.
+        public static IntPtr Listed(List<WinItem> list, IList<IntPtr> chain)
+        {
+            if (list == null || chain == null) return IntPtr.Zero;
+            foreach (IntPtr h in chain)
+                if (h != IntPtr.Zero && list.Exists(delegate(WinItem w) { return w.Hwnd == h; })) return h;
+            return IntPtr.Zero;
+        }
+
         // Окна того же приложения, в том же порядке
         public static List<WinItem> SameApp(List<WinItem> list, string key)
         {
@@ -103,10 +113,12 @@ namespace DevTxt.Smena
             return foregroundFirst ? 1 : 0;
         }
 
-        // Окно на весь экран без заголовка (игра, видео). Развёрнутое окно с заголовком полноэкранным не считается.
-        public static bool IsFullscreen(int left, int top, int right, int bottom, int monLeft, int monTop, int monRight, int monBottom, bool caption)
+        // Окно на весь экран (игра, видео): без заголовка, ровно по границам монитора, не развёрнутое и без рамки для
+        // растягивания. Развёрнутое окно без своего заголовка (Steam, программы на Electron, окна WindowStyle.None) —
+        // обычное окно: оно развёрнуто (maximized), у него есть рамка (thickFrame) или оно выходит за края монитора.
+        public static bool IsFullscreen(int left, int top, int right, int bottom, int monLeft, int monTop, int monRight, int monBottom, bool caption, bool maximized, bool thickFrame)
         {
-            return !caption && left <= monLeft && top <= monTop && right >= monRight && bottom >= monBottom;
+            return !caption && !maximized && !thickFrame && left == monLeft && top == monTop && right == monRight && bottom == monBottom;
         }
 
         // Когда Alt+Tab остаётся системным
@@ -116,19 +128,63 @@ namespace DevTxt.Smena
         }
     }
 
-    enum KeyAction { None, Open, OpenBack, OpenSame, Next, Prev, Left, Right, Up, Down, Commit, Cancel }
+    // Какими окнами пользовались недавно. Порядок Windows (сверху вниз) для этого не годится: окна «поверх всех» в нём
+    // всегда первые, хотя к ним могли не подходить весь день. Список пополняется, когда впереди оказывается новое окно.
+    class Recent
+    {
+        const int Max = 256;
+        readonly List<IntPtr> order = new List<IntPtr>();   // от недавнего к давнему
+
+        // Окно вышло вперёд
+        public void Touch(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            lock (order)
+            {
+                order.Remove(hwnd);
+                order.Insert(0, hwnd);
+                if (order.Count > Max) order.RemoveAt(order.Count - 1);
+            }
+        }
+
+        // Окно свернули или закрыли: оно больше не «недавнее» и встаёт туда, куда его поставила Windows
+        public void Forget(IntPtr hwnd)
+        {
+            lock (order) order.Remove(hwnd);
+        }
+
+        // Расставляет окна: сначала те, которыми пользовались, от недавнего к давнему; остальные — следом, в прежнем порядке
+        public void Sort(List<WinItem> list)
+        {
+            var seen = new List<WinItem>();
+            lock (order)
+            {
+                foreach (IntPtr h in order)
+                {
+                    WinItem w = list.Find(delegate(WinItem x) { return x.Hwnd == h; });
+                    if (w != null && !seen.Contains(w)) seen.Add(w);
+                }
+            }
+            if (seen.Count == 0) return;
+            list.RemoveAll(delegate(WinItem x) { return seen.Contains(x); });
+            list.InsertRange(0, seen);
+        }
+    }
+
+    enum KeyAction { None, Open, OpenBack, OpenSame, Next, Prev, Left, Right, Up, Down, Commit, Cancel, Close }
 
     // Что значит каждая клавиша. Этот же код вызывает перехватчик клавиатуры (Hook.cs) — и больше он не делает ничего:
     // спросил, передал действие окну, вернул «проглотить или нет».
     class KeyMachine
     {
-        public const int Tab = 0x09, Enter = 0x0D, Shift = 0x10, Ctrl = 0x11, Alt = 0x12, Esc = 0x1B, Left = 0x25, Up = 0x26, Right = 0x27, Down = 0x28;
+        public const int Tab = 0x09, Enter = 0x0D, Shift = 0x10, Ctrl = 0x11, Alt = 0x12, Esc = 0x1B, Left = 0x25, Up = 0x26, Right = 0x27, Down = 0x28, Delete = 0x2E;
         public const int LWin = 0x5B, RWin = 0x5C, LShift = 0xA0, RAlt = 0xA5;   // 0xA0…0xA5 — левые и правые Shift, Ctrl, Alt
         public const int GraveScan = 0x29;                                          // клавиша над Tab: «`» или «ё», в любой раскладке
 
         readonly object gate = new object();
         readonly bool[] eaten = new bool[256];   // нажатие проглочено — отпускание проглатывается тоже
         bool active, sticky;
+        int generation;                          // номер переключения: растёт с каждым новым Alt+Tab и показом командой
 
         public Func<bool> LeaveAlone = delegate { return false; };   // спрашивается только в момент первого Alt+Tab
         public Func<bool> SameApp = delegate { return true; };       // включено ли Alt+`
@@ -136,11 +192,17 @@ namespace DevTxt.Smena
         public bool Active { get { lock (gate) return active; } }
         public bool Sticky { get { lock (gate) return sticky; } }
 
-        // Переключатель закрыт не клавишей: щелчком, потерей Alt, ошибкой
+        public int Generation { get { lock (gate) return generation; } }
+
+        // Перехватчик снят: что бы ни шло, оно закончено
         public void End() { lock (gate) { active = false; sticky = false; } }
 
-        // Переключатель открыт командой и ждёт без удержания Alt
-        public void BeginSticky() { lock (gate) { active = true; sticky = true; } }
+        // Показ номер gen закрыт не клавишей: щелчком, потерей Alt, ошибкой. Окно узнаёт об этом позже перехватчика,
+        // и к тому времени человек мог уже начать следующий Alt+Tab — опоздавшее «закончено» его не трогает.
+        public void End(int gen) { lock (gate) { if (gen != generation) return; active = false; sticky = false; } }
+
+        // Переключатель открыт командой и ждёт без удержания Alt. Возвращает номер этого показа.
+        public int BeginSticky() { lock (gate) { active = true; sticky = true; return ++generation; } }
 
         static bool IsAlt(int vk) { return vk == Alt || vk == RAlt - 1 || vk == RAlt; }
         static bool IsModifier(int vk) { return vk == Shift || vk == Ctrl || vk == Alt || vk == LWin || vk == RWin || (vk >= LShift && vk <= RAlt); }
@@ -152,13 +214,15 @@ namespace DevTxt.Smena
 
         // vk, scan — клавиша; down — нажата или отпущена; alt — зажат ли Alt в этот момент;
         // shift — зажат ли Shift; other — зажат Ctrl или Win (тогда сочетание не наше).
-        // Возвращает true — клавишу проглотить; action — что сделать переключателю.
-        public bool Key(int vk, int scan, bool down, bool alt, bool shift, bool other, out KeyAction action)
+        // Возвращает true — клавишу проглотить; action — что сделать переключателю; gen — к какому переключению
+        // это действие относится (с этим номером окно потом зовёт End).
+        public bool Key(int vk, int scan, bool down, bool alt, bool shift, bool other, out KeyAction action, out int gen)
         {
             action = KeyAction.None;
             vk &= 0xFF;
             lock (gate)
             {
+                gen = generation;
                 if (!down)
                 {
                     bool was = eaten[vk];
@@ -174,6 +238,7 @@ namespace DevTxt.Smena
                     if (tab || grave) action = shift ? KeyAction.Prev : KeyAction.Next;
                     else if (vk == Esc) action = KeyAction.Cancel;
                     else if (vk == Enter) action = KeyAction.Commit;
+                    else if (vk == Delete) action = KeyAction.Close;
                     else action = Arrow(vk);
                     if (action == KeyAction.Cancel || action == KeyAction.Commit) { active = false; sticky = false; }
                 }
@@ -185,8 +250,13 @@ namespace DevTxt.Smena
                     if (tab || grave) action = shift ? KeyAction.Prev : KeyAction.Next;
                     else if (vk == Esc) action = KeyAction.Cancel;
                     else if (vk == Enter) action = KeyAction.Commit;
+                    else if (vk == Delete) action = KeyAction.Close;
                     else action = Arrow(vk);
                     if (action == KeyAction.Cancel || action == KeyAction.Commit) active = false;
+                    // Пока переключатель открыт, все клавиши с Alt — наши, даже те, что ничего не значат:
+                    // иначе Alt+буква открывает меню в программе под нами
+                    eaten[vk] = true;
+                    return true;
                 }
                 else
                 {
@@ -194,6 +264,7 @@ namespace DevTxt.Smena
                     if (grave && !SameApp()) return false;
                     if (LeaveAlone()) return false;
                     active = true;
+                    gen = ++generation;
                     action = grave ? KeyAction.OpenSame : shift ? KeyAction.OpenBack : KeyAction.Open;
                 }
                 if (action == KeyAction.None) return false;
@@ -229,6 +300,19 @@ namespace DevTxt.Smena
             if (to == Selected) return false;
             Selected = to;
             return true;
+        }
+
+        // Окно номер index убрали из показа (его закрыли). Выбор остаётся на том же окне, а если убрали выбранное —
+        // переходит на занявшее его место. cols — сколько теперь колонок. false — окон не осталось, показ закрыт.
+        public bool Remove(int index, int cols)
+        {
+            if (!Open || index < 0 || index >= Count) return Open;
+            Count--;
+            Cols = Math.Max(1, cols);
+            if (index < Selected) Selected--;
+            if (Selected >= Count) Selected = Math.Max(0, Count - 1);
+            if (Count == 0) Open = false;
+            return Open;
         }
 
         // Закрывает показ. Возвращает номер выбранного окна или -1, если показа не было.

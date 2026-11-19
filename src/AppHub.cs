@@ -40,7 +40,7 @@ namespace DevTxt.Smena
             var view = new object[]
             {
                 HubLink.Msg("key", "allDesktops", "type", "switch", "label", "Показывать окна со всех рабочих столов", "hint", "Иначе — только с текущего", "value", Prefs.AllDesktops),
-                HubLink.Msg("key", "size", "type", "slider", "label", "Размер превью", "value", Prefs.Size, "min", Layout.MinPreview, "max", Layout.MaxPreview, "step", Layout.StepPreview, "unit", "пкс")
+                HubLink.Msg("key", "size", "type", "slider", "label", "Размер превью", "value", Prefs.Size, "min", Layout.MinPreview, "max", Layout.MaxPreview, "step", Layout.StepPreview, "unit", "px")
             };
             return HubLink.Msg("groups", new object[] { HubLink.Msg("title", "Клавиши", "items", keys), HubLink.Msg("title", "Вид", "items", view) });
         }

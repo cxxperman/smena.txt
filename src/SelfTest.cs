@@ -44,24 +44,26 @@ namespace DevTxt.Smena
             {
                 if (vk == KeyMachine.Alt) alt = down;
                 KeyAction a;
+                int g;
                 // Как в Windows: у отпускания самого Alt признака «Alt зажат» уже нет
-                bool eaten = M.Key(vk, scan, down, alt, shift, ctrl, out a);
+                bool eaten = M.Key(vk, scan, down, alt, shift, ctrl, out a, out g);
                 if (vk == KeyMachine.Shift) shift = down;
                 if (vk == KeyMachine.Ctrl) ctrl = down;
-                if (a != KeyAction.None) { Log.Add(a); Do(a); }
+                if (a != KeyAction.None) { Log.Add(a); Do(a, g); }
                 return eaten;
             }
 
             public bool Tap(int vk) { bool e = Send(vk, true); Send(vk, false); return e; }
 
             // То же, что делает окно переключателя, только без окна
-            void Do(KeyAction a)
+            void Do(KeyAction a, int g)
             {
                 if (a == KeyAction.Open || a == KeyAction.OpenBack || a == KeyAction.OpenSame)
                 {
-                    if (Count == 0) { M.End(); return; }
+                    if (Count == 0) { M.End(g); return; }
                     S.Begin(Count, Cols, ForegroundFirst, a == KeyAction.OpenBack);
                 }
+                else if (a == KeyAction.Close) { if (S.Open && !S.Remove(S.Selected, Cols)) M.End(g); }
                 else if (a == KeyAction.Commit) { int c = S.Close(); if (c >= 0) Chosen = c; }
                 else if (a == KeyAction.Cancel) { if (S.Open) Chosen = -1; S.Close(); }
                 else S.Move(a);
@@ -103,6 +105,34 @@ namespace DevTxt.Smena
 
             Func<int, string, WinItem> item = delegate(int hwnd, string key) { return new WinItem { Hwnd = new IntPtr(hwnd), Title = "t" + hwnd, Key = key }; };
             Func<List<WinItem>, string> order = delegate(List<WinItem> l) { return string.Join(",", l.ConvertAll(delegate(WinItem w) { return w.Hwnd.ToString(); }).ToArray()); };
+            // Порядок «от недавнего к давнему»: не по тому, как окна лежат в Windows (там «поверх всех» всегда первые),
+            // а по тому, какими пользовались; окна, которых ещё не видели впереди, — следом, как лежат
+            var used = new Recent();
+            var zlist = new List<WinItem> { item(1, "top"), item(2, "edit"), item(3, "web"), item(4, "mail"), item(5, "chat") };
+            used.Sort(zlist);
+            Check(order(zlist) == "1,2,3,4,5", "nothing used yet: the list stays in z-order");
+            used.Touch(new IntPtr(4)); used.Touch(new IntPtr(2)); used.Touch(new IntPtr(99)); used.Touch(IntPtr.Zero);
+            used.Sort(zlist);
+            Check(order(zlist) == "2,4,1,3,5", "used windows go first, most recent first; never-seen ones keep z-order (the topmost one is no longer first), got " + order(zlist));
+            used.Touch(new IntPtr(4));
+            used.Sort(zlist);
+            Check(order(zlist) == "4,2,1,3,5", "using a window again moves it to the front once, got " + order(zlist));
+            used.Forget(new IntPtr(4));
+            zlist = new List<WinItem> { item(1, "top"), item(2, "edit"), item(3, "web"), item(5, "chat"), item(4, "mail") };
+            used.Sort(zlist);
+            Check(order(zlist) == "2,1,3,5,4", "a minimised window is forgotten and falls back to its z-order place, got " + order(zlist));
+            for (int i = 1000; i < 1400; i++) used.Touch(new IntPtr(i));
+            used.Sort(zlist);
+            Check(order(zlist) == "1,2,3,5,4" || order(zlist) == "2,1,3,5,4", "the recent list does not grow without end");
+
+            // Впереди диалог, которого в списке нет: текущим считается его владелец
+            var owners = new List<WinItem> { item(1, "top"), item(2, "edit"), item(3, "web") };
+            Check(Logic.Listed(owners, new IntPtr[] { new IntPtr(50), new IntPtr(51), new IntPtr(3), new IntPtr(1) }) == new IntPtr(3), "a dialog in front maps to its nearest listed owner");
+            Check(Logic.Listed(owners, new IntPtr[] { new IntPtr(2), new IntPtr(1) }) == new IntPtr(2), "a listed foreground window stays itself");
+            Check(Logic.Listed(owners, new IntPtr[] { new IntPtr(50), IntPtr.Zero }) == IntPtr.Zero && Logic.Listed(owners, null) == IntPtr.Zero && Logic.Listed(owners, new IntPtr[0]) == IntPtr.Zero, "no listed owner: nothing is in front");
+            Check(Logic.ForegroundFirst(owners, Logic.Listed(owners, new IntPtr[] { new IntPtr(50), new IntPtr(3) })) && order(owners) == "3,1,2" && Logic.StartIndex(owners.Count, true, false) == 1,
+                "with a dialog in front, Alt+Tab starts from the window used before its owner, got " + order(owners));
+
             var mru = new List<WinItem> { item(1, "top"), item(2, "edit"), item(3, "web"), item(4, "EDIT") };
             Check(Logic.ForegroundFirst(mru, new IntPtr(3)) && order(mru) == "3,1,2,4", "the foreground window goes first, the rest keep their order, got " + order(mru));
             Check(!Logic.ForegroundFirst(mru, new IntPtr(99)) && !Logic.ForegroundFirst(mru, IntPtr.Zero) && order(mru) == "3,1,2,4", "an unknown foreground window changes nothing");
@@ -160,8 +190,70 @@ namespace DevTxt.Smena
 
             k = new Keys();
             k.Send(Alt, true); k.Tap(Tab);
-            Check(!k.Tap(0x41) && k.M.Active, "other keys with Alt held are not swallowed and do not end the session");
+            // Пока переключатель открыт, Alt+буква до программы под ним не доходит (иначе она открывает меню)
+            Check(k.Send(0x41, true) && k.Send(0x41, false) && k.M.Active && k.S.Open && k.S.Selected == 1 && k.Log.Count == 1, "other keys with Alt held are swallowed (down and up), do nothing and do not end the session");
+            Check(k.Tap(0x73) && k.Tap(0x20) && k.M.Active, "Alt+F4 and Alt+Space do not reach the app underneath either");
+            Check(!k.Send(Shift, true) && !k.Send(Shift, false) && !k.Send(KeyMachine.LWin, true) && !k.Send(KeyMachine.LWin, false), "modifiers are never swallowed");
             Check(k.Tap(KeyMachine.Enter) && k.Chosen == 1 && !k.M.Active, "Enter with Alt held switches at once");
+            Check(!k.Tap(0x41), "after the switch letters are ordinary letters again");
+            k.Send(Alt, false);
+
+            // Delete закрывает выбранное окно: карточка уходит, показ продолжается
+            k = new Keys();
+            k.Send(Alt, true); k.Tap(Tab); k.Tap(Tab);
+            Check(k.Tap(KeyMachine.Delete) && k.Log[k.Log.Count - 1] == KeyAction.Close && k.S.Open && k.S.Count == 4 && k.S.Selected == 2 && k.M.Active, "Delete with Alt held closes the selected window and keeps the switcher open");
+            k.Send(Alt, false);
+            Check(k.Chosen == 2, "after Delete, Alt up switches to the window that took its place");
+            k = new Keys { Count = 1 };
+            k.Send(Alt, true); k.Tap(Tab); k.Tap(KeyMachine.Delete);
+            Check(!k.S.Open && !k.M.Active, "closing the last window ends the switcher");
+            k.Send(Alt, false);
+            Check(!k.Tap(KeyMachine.Delete) && k.Chosen == -2, "with the switcher closed Delete is an ordinary key");
+            var rs = new Session();
+            rs.Begin(9, 5, true, false);
+            rs.Selected = 8;
+            Check(rs.Remove(8, 4) && rs.Count == 8 && rs.Selected == 7 && rs.Cols == 4, "removing the last selected card selects the new last one");
+            Check(rs.Remove(2, 4) && rs.Count == 7 && rs.Selected == 6, "removing a card before the selected one keeps the same window selected");
+            Check(rs.Remove(6, 4) && rs.Selected == 5 && rs.Remove(99, 4) && rs.Remove(-1, 4) && rs.Count == 6, "a card that is not there is not removed");
+            rs.Selected = 0;
+            Check(rs.Remove(0, 4) && rs.Selected == 0 && rs.Count == 5, "removing the first selected card selects the next one");
+            rs.Close();
+            Check(!rs.Remove(0, 4) && rs.Count == 5, "a closed session removes nothing");
+
+            // Быстрый второй Alt+Tab: окно узнаёт о конце первого переключения позже перехватчика и говорит «закончено»
+            // уже во время второго — опоздавшее «закончено» второе переключение не трогает
+            k = new Keys();
+            k.Send(Alt, true); k.Tap(Tab);
+            int g1 = k.M.Generation;
+            k.Send(Alt, false);
+            k.Send(Alt, true); k.Tap(Tab);
+            int g2 = k.M.Generation;
+            k.M.End(g1);
+            Check(g2 != g1 && k.M.Active, "a late End of the first Alt+Tab does not end the second one");
+            Check(k.Tap(Tab) && k.S.Selected == 2, "…Tab still moves in the second one");
+            k.Chosen = -2;
+            Check(!k.Send(Alt, false) && k.Chosen == 2 && k.Log[k.Log.Count - 1] == KeyAction.Commit, "…and releasing Alt still switches, chose " + k.Chosen);
+            k.Send(Alt, true); k.Tap(Tab);
+            k.M.End(k.M.Generation);
+            Check(!k.M.Active && !k.Tap(KeyMachine.Left), "End with the current generation does end the session (click, lost Alt)");
+            k.Send(Alt, false);
+            k = new Keys();
+            int gs = k.M.BeginSticky();
+            Check(gs == k.M.Generation && gs != 0 && k.M.Sticky, "a sticky show gets its own generation");
+            k.M.End(gs - 1);
+            Check(k.M.Sticky, "…and an older End does not close it");
+            k.M.End(gs);
+            Check(!k.M.Active && !k.M.Sticky, "…while its own End does");
+            k = new Keys();
+            KeyAction ga; int gk1, gk2, gk3;
+            k.M.Key(Alt, 0x38, true, true, false, false, out ga, out gk1);
+            k.M.Key(Tab, 0x0F, true, true, false, false, out ga, out gk1);
+            k.M.Key(Tab, 0x0F, true, true, false, false, out ga, out gk2);
+            k.M.Key(Alt, 0x38, false, false, false, false, out ga, out gk3);
+            Check(gk1 == gk2 && gk2 == gk3 && ga == KeyAction.Commit && gk1 == k.M.Generation, "every action of one Alt+Tab carries the same generation");
+            k.M.Key(Alt, 0x38, true, true, false, false, out ga, out gk2);
+            k.M.Key(Tab, 0x0F, true, true, false, false, out ga, out gk2);
+            Check(gk2 == gk1 + 1 && ga == KeyAction.Open, "the next Alt+Tab gets the next generation");
 
             k = new Keys();
             k.Send(Alt, true); k.Send(KeyMachine.Ctrl, true);
@@ -173,7 +265,8 @@ namespace DevTxt.Smena
             k = new Keys();
             k.Send(Alt, true); k.Tap(Tab); k.Tap(Tab);
             KeyAction stale;
-            Check(!k.M.Key(0x41, 0x1E, true, false, false, false, out stale) && stale == KeyAction.Commit && !k.M.Active, "a key without Alt during a session ends it and goes through");
+            int staleGen;
+            Check(!k.M.Key(0x41, 0x1E, true, false, false, false, out stale, out staleGen) && stale == KeyAction.Commit && !k.M.Active, "a key without Alt during a session ends it and goes through");
 
             // Нажатия, помеченные как проглоченные, не «залипают»: отпускание без нажатия не трогаем
             k = new Keys();
@@ -229,10 +322,15 @@ namespace DevTxt.Smena
             leave = true;
             Check(k.Tap(Tab) && k.S.Selected == 2, "a session that has begun is not dropped halfway");
             k.Send(Alt, false);
-            Check(Logic.IsFullscreen(0, 0, 1920, 1080, 0, 0, 1920, 1080, false), "borderless window over the whole monitor is fullscreen");
-            Check(Logic.IsFullscreen(1920, 0, 4480, 1440, 1920, 0, 4480, 1440, false), "…on the second monitor too");
-            Check(!Logic.IsFullscreen(-8, -8, 1928, 1088, 0, 0, 1920, 1080, true), "a maximised window with a caption is not");
-            Check(!Logic.IsFullscreen(0, 0, 1920, 1040, 0, 0, 1920, 1080, false), "a window that leaves the taskbar visible is not");
+            Check(Logic.IsFullscreen(0, 0, 1920, 1080, 0, 0, 1920, 1080, false, false, false), "borderless window over the whole monitor is fullscreen");
+            Check(Logic.IsFullscreen(1920, 0, 4480, 1440, 1920, 0, 4480, 1440, false, false, false), "…on the second monitor too");
+            Check(!Logic.IsFullscreen(-8, -8, 1928, 1088, 0, 0, 1920, 1080, true, true, true), "a maximised window with a caption is not");
+            Check(!Logic.IsFullscreen(0, 0, 1920, 1040, 0, 0, 1920, 1080, false, false, false), "a window that leaves the taskbar visible is not");
+            // Развёрнутое окно без заголовка (Steam, Electron, WindowStyle.None) — не игра: из-за него Alt+Tab уходил системе
+            Check(!Logic.IsFullscreen(0, 0, 1920, 1080, 0, 0, 1920, 1080, false, true, false), "a maximised frameless window is not fullscreen");
+            Check(!Logic.IsFullscreen(0, 0, 1920, 1080, 0, 0, 1920, 1080, false, false, true), "a frameless window with a sizing border is not fullscreen");
+            Check(!Logic.IsFullscreen(-8, -8, 1928, 1088, 0, 0, 1920, 1080, false, false, false) && !Logic.IsFullscreen(-1, 0, 1920, 1080, 0, 0, 1920, 1080, false, false, false), "a window that sticks out past the monitor is not fullscreen: the rectangle must match exactly");
+            Check(!Logic.IsFullscreen(0, 0, 3840, 1080, 0, 0, 1920, 1080, false, false, false), "a window spanning two monitors is not fullscreen");
 
             // ── Раскладка и прокрутка ──
             int cols, rows, visible;

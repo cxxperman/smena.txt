@@ -1,7 +1,11 @@
-// smena.txt. Switcher.cs — сам переключатель: прозрачное окно на весь монитор, затемнение, стеклянная панель по центру
+// smena.txt. Switcher.cs — сам переключатель: прозрачное окно на весь монитор, стеклянная панель по центру
 // и на ней карточки окон — живое превью (его рисует сама Windows поверх нашего окна), значок и заголовок.
 // Окно создаётся один раз при запуске и дальше только показывается и прячется; тяжёлого при показе нет:
 // значки берутся из памяти, превью Windows отдаёт сразу.
+// Чтобы ничего не мигало: затемнения экрана нет; окно показывается спрятанным (Win.Cloak) и открывается глазам только
+// с готовой картинкой; превью ставятся сразу на свои места и вместе с карточками не ездят и не растут — панель только
+// проявляется; покадровая работа идёт лишь пока что-то движется.
+// Быстрый Alt+Tab окна не показывает вовсе: выбор сделан сразу, панель появляется, только если Alt всё ещё держат.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -20,43 +24,48 @@ namespace DevTxt.Smena
     class Card
     {
         public WinItem Item;
-        public Grid Root;
-        public Border Box, Hover, IconHost;     // Box — место превью
+        public Grid Root, Slot;                 // Slot — место карточки в ряду
+        public Border Box, Hover, IconHost;     // Box — место превью: ровная подложка, на ней — превью
         public Border BigIconHost;              // крупный значок вместо превью (свёрнутое окно); может не быть
         public TextBlock Title;
-        public readonly ScaleTransform Scale = new ScaleTransform(1, 1);
-        public Grid Slot;                       // место карточки в ряду
-        public Canvas Row;                      // её ряд
         public IntPtr Thumb;
-        public Win.RECT Source, LastDest, LastSource;
+        public Win.RECT Source;                 // видимая часть окна-источника
+        public Win.RECT Dest, Part;             // где превью стоит на экране и какая часть окна в нём видна
+        public bool Placed, InView;             // место сосчитано; превью не за краем панели
+        public Win.RECT LastDest, LastSource;   // что уже сказано Windows
         public int LastOpacity = -1;
         public bool LastVisible;
     }
 
     class Switcher : Window
     {
-        const double PanelPad = 14, Footer = 30, SelectedScale = 1.03, Shadow = 40;
+        const double PanelPad = 14, Footer = 30, Shadow = 40;
+        const int RevealMs = 150;   // столько держат Alt после Tab, прежде чем панель появится; быстрее — переключение без панели
 
         readonly bool demo, headless;
         readonly Session session = new Session();
         readonly List<Card> cards = new List<Card>();
         List<WinItem> items = new List<WinItem>();
         bool sticky, snap;
-        int cols, rows, visibleRows, firstRow;
-        double preview, cardW, cardH, thumbH, scale = 1;
+        bool revealed;                      // панель построена и показана; false — окна только выбраны (быстрый Alt+Tab)
+        bool awaiting;                      // окно показано, но спрятано от глаз, пока не нарисован первый кадр
+        int gen;                            // номер переключения у KeyMachine, к которому относится этот показ
+        int cols, rows, visibleRows, firstRow, frames;
+        double preview, cardW, cardH, thumbH, panelW, panelH, viewW, viewH, scale = 1;
+        Win.RECT mon;
         IntPtr hwnd;
 
         readonly Grid root = new Grid();
         readonly Border dim, shadow, glass, highlight, scrollMark;
-        readonly Grid panelHost = new Grid(), glow = new Grid();
+        readonly Grid panelHost = new Grid(), glow = new Grid(), foot;
         readonly Canvas viewport = new Canvas { ClipToBounds = true }, strip = new Canvas(), deck = new Canvas();
         readonly TranslateTransform highlightAt = new TranslateTransform();
         readonly TextBlock hint;
-        readonly DispatcherTimer altWatch;
+        readonly DispatcherTimer altWatch, revealTimer, uncloakGuard;
         readonly Stopwatch clock = new Stopwatch();
         double hx, hy, hvx, hvy, tx, ty;   // подсветка: где она, скорость, куда едет
         double sy, svy, tsy;               // прокрутка рядов
-        double last;
+        double last, fadeEnd;
         bool ticking;
 
         public KeyMachine Machine;          // клавиши; может не быть (--demo, снимки)
@@ -81,8 +90,9 @@ namespace DevTxt.Smena
             UseLayoutRounding = true;
             TextOptions.SetTextFormattingMode(this, TextFormattingMode.Ideal);
 
-            // Затемнение: щелчок мимо панели — отмена
-            dim = new Border { Background = Ui.Solid(Ui.Alpha(Tokens.Dark.Bg, 0.5)) };
+            // Затемнения экрана нет: оно мигало при каждом Alt+Tab. Остался невидимый глазу слой на весь монитор
+            // (совсем прозрачное место Windows отдаёт окну под нами): щелчок мимо панели — отмена
+            dim = new Border { Background = Ui.Solid(Color.FromArgb(1, 0, 0, 0)) };
             dim.MouseLeftButtonDown += delegate { Cancel(); };
             root.Children.Add(dim);
 
@@ -94,15 +104,11 @@ namespace DevTxt.Smena
             };
             glow.Opacity = 0.6;
             glow.IsHitTestVisible = false;
+            // Подсказка про клавиши — только когда переключатель открыт командой: при Alt+Tab клавиши и так под пальцами
             hint = Ui.T("", Tokens.Size.Micro, Ui.Label3, FontWeights.Normal);
             hint.VerticalAlignment = VerticalAlignment.Center;
-            hint.HorizontalAlignment = HorizontalAlignment.Right;
-            var mark = Ui.Sprite(Program.Sprite, 16);
-            mark.VerticalAlignment = VerticalAlignment.Center;
-            var brand = Ui.Brand(Program.Id, Tokens.Size.Caption, FontWeights.SemiBold);
-            brand.Margin = new Thickness(7, 0, 0, 1); brand.VerticalAlignment = VerticalAlignment.Center;
-            var foot = new Grid { Height = Footer, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(Layout.Margin + 2, 0, Layout.Margin + 2, 0) };
-            foot.Children.Add(new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Left, Children = { mark, brand } });
+            hint.HorizontalAlignment = HorizontalAlignment.Center;
+            foot = new Grid { Height = Footer, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(Layout.Margin + 2, 0, Layout.Margin + 2, 0), Visibility = Visibility.Collapsed };
             foot.Children.Add(hint);
             viewport.VerticalAlignment = VerticalAlignment.Top;
             viewport.HorizontalAlignment = HorizontalAlignment.Left;
@@ -112,7 +118,7 @@ namespace DevTxt.Smena
             glass = new Border
             {
                 CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Ui.CardFill, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1),
-                Padding = new Thickness(PanelPad - 1, PanelPad - 1, PanelPad - 1, PanelPad / 2 - 1), Child = new Grid { Children = { viewport, foot } }, SnapsToDevicePixels = true
+                Padding = new Thickness(PanelPad - 1), Child = new Grid { Children = { viewport, foot } }, SnapsToDevicePixels = true
             };
             panelHost.HorizontalAlignment = HorizontalAlignment.Center;
             panelHost.VerticalAlignment = VerticalAlignment.Center;
@@ -134,16 +140,34 @@ namespace DevTxt.Smena
             altWatch = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
             altWatch.Tick += delegate { if (session.Open && !sticky && !Win.KeyDown(KeyMachine.Alt)) Commit(); };
 
+            // Панель появляется не сразу: быстрый Alt+Tab успевает закончиться раньше и обходится без неё
+            revealTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(RevealMs) };
+            revealTimer.Tick += delegate
+            {
+                revealTimer.Stop();
+                try
+                {
+                    if (!session.Open || revealed) return;
+                    if (!sticky && !Win.KeyDown(KeyMachine.Alt)) Commit(); else Reveal();
+                }
+                catch { Abort(); throw; }
+            };
+
+            // Если кадры почему-то не идут, спрятанным окно не остаётся
+            uncloakGuard = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+            uncloakGuard.Tick += delegate { uncloakGuard.Stop(); Uncloak(); };
+
             // Клавиши, когда окно само в фокусе (показ командой, без перехватчика)
             PreviewKeyDown += delegate(object s, KeyEventArgs e)
             {
                 if (!session.Open || !sticky) return;
                 bool shift = (Keyboard.Modifiers & ModifierKeys.Shift) != 0;
                 KeyAction a = e.Key == Key.Tab ? (shift ? KeyAction.Prev : KeyAction.Next) : e.Key == Key.Left ? KeyAction.Left : e.Key == Key.Right ? KeyAction.Right
-                    : e.Key == Key.Up ? KeyAction.Up : e.Key == Key.Down ? KeyAction.Down : e.Key == Key.Escape ? KeyAction.Cancel : e.Key == Key.Enter ? KeyAction.Commit : KeyAction.None;
+                    : e.Key == Key.Up ? KeyAction.Up : e.Key == Key.Down ? KeyAction.Down : e.Key == Key.Escape ? KeyAction.Cancel : e.Key == Key.Enter ? KeyAction.Commit
+                    : e.Key == Key.Delete ? KeyAction.Close : KeyAction.None;
                 if (a == KeyAction.None) return;
                 e.Handled = true;
-                Handle(a);
+                Handle(a, gen);
             };
             Deactivated += delegate { if (session.Open && sticky && IsVisible) Cancel(); };
         }
@@ -159,23 +183,32 @@ namespace DevTxt.Smena
         }
 
         // ───────── Действия: от клавиатуры (через KeyMachine), от мыши, от команды ─────────
-        public void Handle(KeyAction a)
+
+        // g — номер переключения, к которому действие относится (его дал KeyMachine)
+        public void Handle(KeyAction a, int g)
         {
             try
             {
                 if (a == KeyAction.Open || a == KeyAction.OpenBack || a == KeyAction.OpenSame)
                 {
-                    if (!session.Open && !OpenView(false, a) && Machine != null) Machine.End();
+                    // Показ ещё открыт, а перехватчик начал новое переключение: дальше этот показ — его
+                    if (session.Open) gen = g;
+                    else if (!OpenView(false, a, g) && Machine != null) Machine.End(g);
                 }
                 else if ((a == KeyAction.Next || a == KeyAction.Prev) && !session.Open && Machine != null && Machine.Active && !Machine.Sticky)
                 {
                     // Перехватчик уже считает, что переключение идёт, а показа нет (прошлый закрылся раньше времени):
                     // не глотаем Tab впустую — открываем показ
-                    if (!OpenView(false, a == KeyAction.Prev ? KeyAction.OpenBack : KeyAction.Open)) Machine.End();
+                    if (!OpenView(false, a == KeyAction.Prev ? KeyAction.OpenBack : KeyAction.Open, g)) Machine.End(g);
                 }
                 else if (a == KeyAction.Commit) Commit();
                 else if (a == KeyAction.Cancel) Cancel();
-                else if (session.Move(a)) Select(true);
+                else if (a == KeyAction.Close) { if (session.Open) { if (!revealed) Reveal(); CloseCard(session.Selected); } }
+                else if (session.Move(a))
+                {
+                    // Tab нажали ещё раз — человек выбирает, а не просто возвращается к прошлому окну: панель нужна сейчас
+                    if (!revealed) Reveal(); else Select(true);
+                }
             }
             catch { Abort(); throw; }
         }
@@ -186,15 +219,17 @@ namespace DevTxt.Smena
             if (session.Open) return false;
             try
             {
-                if (!OpenView(true, KeyAction.Open)) return false;
+                if (!OpenView(true, KeyAction.Open, 0)) return false;
                 if (headless) return true;
-                if (Machine != null) Machine.BeginSticky();
+                if (Machine != null) gen = Machine.BeginSticky();
                 return true;
             }
             catch { Abort(); throw; }
         }
 
-        bool OpenView(bool stay, KeyAction how)
+        // Начало показа: окна перечислены, выбор сделан. Панель при Alt+Tab появляется чуть позже (Reveal), если Alt
+        // ещё держат; отпустили раньше — Commit просто выводит выбранное окно вперёд, и на экране ничего не мелькает.
+        bool OpenView(bool stay, KeyAction how, int g)
         {
             bool fgFirst = true;
             items = demo ? Demo.Windows(DemoCount) : Win.List(Prefs.AllDesktops, true, out fgFirst);
@@ -204,43 +239,82 @@ namespace DevTxt.Smena
             if (headless) return true;   // проверки без экрана: окна сосчитаны, показывать нечего
 
             sticky = stay;
-            Win.RECT mon = Win.ActiveMonitor();
-            double w = (mon.Right - mon.Left) / scale, h = (mon.Bottom - mon.Top) / scale;
-            Arrange(w, h);
+            gen = g;
+            revealed = false;
+            firstRow = 0;
+            mon = Win.ActiveMonitor();
+            viewW = (mon.Right - mon.Left) / scale; viewH = (mon.Bottom - mon.Top) / scale;
+            Measure(viewW, viewH);
             session.Begin(items.Count, cols, fgFirst, how == KeyAction.OpenBack);
-            foreach (Card c in cards)
-            {
-                if (c.Item.Minimized) continue;
-                c.Thumb = Win.ThumbRegister(hwnd, c.Item.Hwnd);
-                if (c.Thumb != IntPtr.Zero && !Win.ThumbSource(c.Thumb, c.Item.Hwnd, out c.Source)) { Win.ThumbRelease(c.Thumb); c.Thumb = IntPtr.Zero; }
-            }
-            foreach (Card c in cards) if (c.Thumb == IntPtr.Zero) NoPreview(c);
-
-            Left = mon.Left / scale; Top = mon.Top / scale; Width = w; Height = h;
-            Win.Style(hwnd, !sticky);
-            snap = Ui.ReducedMotion;
-            Select(false);
-            Enter();
-            Show();
-            Win.Place(hwnd, mon);
-            root.UpdateLayout();
-            SyncThumbs();
-            clock.Restart();
-            last = 0;
-            if (!ticking) { CompositionTarget.Rendering += Frame; ticking = true; }
-            if (sticky) Activate();
+            if (sticky) Reveal();
             else
             {
                 Win.SendMask();   // чтобы программа под нами не открыла меню, когда Alt отпустят
                 altWatch.Start();
+                revealTimer.Start();
             }
             return true;
+        }
+
+        // Строит панель и показывает её. Окно ставится на место и раскладывается ещё невидимым, показывается спрятанным
+        // от глаз (Win.Cloak) и открывается, когда первый кадр готов: кадра от прошлого показа на экране не бывает.
+        void Reveal()
+        {
+            revealTimer.Stop();
+            if (revealed || !session.Open) return;
+            revealed = true;
+            Build();
+            foreach (Card c in cards)
+            {
+                if (c.Item.Minimized || c.Item.Fake) continue;
+                c.Thumb = Win.ThumbRegister(hwnd, c.Item.Hwnd);
+                if (c.Thumb != IntPtr.Zero && !Win.ThumbSource(c.Thumb, c.Item.Hwnd, out c.Source)) { Win.ThumbRelease(c.Thumb); c.Thumb = IntPtr.Zero; }
+                if (c.Thumb == IntPtr.Zero) NoPreview(c);
+            }
+
+            snap = Ui.ReducedMotion;
+            panelHost.BeginAnimation(OpacityProperty, null);
+            panelHost.RenderTransform = null;
+            panelHost.Opacity = snap ? 1 : 0;
+            Win.Cloak(hwnd, true);
+            awaiting = true;
+            frames = 0;
+            Left = mon.Left / scale; Top = mon.Top / scale; Width = viewW; Height = viewH;
+            Win.Style(hwnd, !sticky);
+            Win.Place(hwnd, mon);
+            Select(false);
+            root.UpdateLayout();
+            Show();
+            Win.Place(hwnd, mon);
+            root.UpdateLayout();
+            SyncThumbs(true);
+            clock.Restart();
+            last = 0; fadeEnd = 0;
+            StartTicking();
+            uncloakGuard.Start();
+            if (sticky) Activate();
+        }
+
+        // Первый кадр нового показа готов — открываем окно глазам; панель проявляется (и только: ничего не едет и не растёт)
+        void Uncloak()
+        {
+            uncloakGuard.Stop();
+            if (!awaiting) return;
+            awaiting = false;
+            Win.Cloak(hwnd, false);
+            if (!snap)
+            {
+                panelHost.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(Tokens.Motion.FastMs)) { EasingFunction = Ui.EaseOut });
+                fadeEnd = clock.Elapsed.TotalSeconds + Tokens.Motion.FastMs / 1000.0 + 0.05;
+                StartTicking();
+            }
+            SyncThumbs(false);
         }
 
         void Commit()
         {
             int chosen = session.Close();
-            if (Machine != null) Machine.End();
+            if (Machine != null) Machine.End(gen);
             if (chosen < 0) return;
             WinItem target = chosen < items.Count ? items[chosen] : null;
             if (!demo && !headless && target != null) Win.Activate(target.Hwnd);
@@ -251,20 +325,26 @@ namespace DevTxt.Smena
         {
             bool was = session.Open;
             session.Close();
-            if (Machine != null) Machine.End();
+            if (Machine != null) Machine.End(gen);
             if (was) CloseView();
         }
 
-        // Что-то пошло не так — затемнение на экране не оставляем ни при каких условиях
+        // Что-то пошло не так — на экране ничего не оставляем ни при каких условиях
         public void Abort()
         {
-            try { session.Close(); if (Machine != null) Machine.End(); CloseView(); } catch { }
+            try { session.Close(); if (Machine != null) Machine.End(gen); CloseView(); } catch { }
         }
 
         void CloseView()
         {
             altWatch.Stop();
-            if (ticking) { CompositionTarget.Rendering -= Frame; ticking = false; }
+            revealTimer.Stop();
+            uncloakGuard.Stop();
+            StopTicking();
+            // Сначала прячем окно от глаз — панель и превью исчезают разом; спрятанным оно и остаётся до следующего показа
+            if (hwnd != IntPtr.Zero && (revealed || IsVisible)) Win.Cloak(hwnd, true);
+            awaiting = false;
+            revealed = false;
             foreach (Card c in cards) { Win.ThumbRelease(c.Thumb); c.Thumb = IntPtr.Zero; }
             if (IsVisible) Hide();
             cards.Clear();
@@ -273,30 +353,71 @@ namespace DevTxt.Smena
             if (Finished != null) Finished();
         }
 
+        // Закрывает окно с карточки (Delete или щелчок колёсиком) и убирает карточку; показ продолжается
+        void CloseCard(int at)
+        {
+            if (!session.Open || at < 0 || at >= items.Count) return;
+            WinItem w = items[at];
+            if (!w.Fake && !demo && !headless) Win.Close(w.Hwnd);
+            items.RemoveAt(at);
+            if (items.Count > 0) Measure(viewW, viewH);
+            if (!session.Remove(at, cols))
+            {
+                // Окон не осталось
+                if (Machine != null) Machine.End(gen);
+                CloseView();
+                return;
+            }
+            if (!revealed) return;
+            // Карточки строятся заново, а живые превью оставшихся окон остаются теми же — они не мигают
+            var old = new List<Card>(cards);
+            Build();
+            foreach (Card c in cards)
+            {
+                Card was = old.Find(delegate(Card x) { return x.Item == c.Item; });
+                if (was == null) continue;
+                c.Thumb = was.Thumb; c.Source = was.Source;
+                was.Thumb = IntPtr.Zero;
+            }
+            foreach (Card c in old) { Win.ThumbRelease(c.Thumb); c.Thumb = IntPtr.Zero; }
+            foreach (Card c in cards) if (c.Thumb == IntPtr.Zero && !c.Item.Fake) NoPreview(c);
+            Select(false);
+        }
+
         // ───────── Раскладка ─────────
 
-        // Строит карточки для окон items на экране w×h
-        void Arrange(double w, double h)
+        // Считает раскладку для окон items на экране w×h: размер карточки, сколько колонок и рядов, размер панели.
+        // Карточек не строит — это быстро, и этого хватает, чтобы выбрать окно.
+        void Measure(double w, double h)
         {
             root.Width = w; root.Height = h;
             preview = Math.Max(Layout.MinPreview, Math.Min(Layout.MaxPreview, Prefs.Size));
             // Маленький экран: карточка не шире, чем он позволяет
             preview = Math.Min(preview, Math.Max(80, w * 0.9 - 2 * (PanelPad + Layout.Margin + Layout.Pad)));
             cardW = Layout.CardW(preview); cardH = Layout.CardH(preview); thumbH = Layout.ThumbH(preview);
-            Layout.Rows(items.Count, cardW, cardH, w * 0.92 - 2 * (PanelPad + Layout.Margin), h * 0.84 - PanelPad * 1.5 - Footer - 2 * Layout.Margin, out cols, out rows, out visibleRows);
-            firstRow = 0;
+            // Строка с подсказкой есть только при показе командой
+            double footer = sticky ? Footer : 0, bottom = sticky ? PanelPad / 2 : PanelPad;
+            Layout.Rows(items.Count, cardW, cardH, w * 0.92 - 2 * (PanelPad + Layout.Margin), h * 0.84 - PanelPad - bottom - footer - 2 * Layout.Margin, out cols, out rows, out visibleRows);
+            firstRow = Math.Max(0, Math.Min(firstRow, rows - visibleRows));
 
             double vw = cols * cardW + (cols - 1) * Layout.Gap + 2 * Layout.Margin, vh = visibleRows * cardH + (visibleRows - 1) * Layout.Gap + 2 * Layout.Margin;
-            // Узкая панель: подсказке про клавиши нужно место рядом с названием
-            double minW = 2 * (Layout.Margin + 2) + 120 + hint.FontSize * 0.5 * HintText().Length;
-            double pw = Math.Max(vw, minW) + 2 * PanelPad, ph = PanelPad + vh + Footer + PanelPad / 2;
+            hint.Text = sticky ? "Щёлкните окно или нажмите Enter  ·  Delete — закрыть окно  ·  Esc — отмена" : "";
+            // Узкая панель: подсказке про клавиши нужно место
+            double minW = sticky ? 2 * (Layout.Margin + 2) + hint.FontSize * 0.55 * hint.Text.Length : 0;
+            panelW = Math.Max(vw, minW) + 2 * PanelPad; panelH = PanelPad + vh + footer + bottom;
+            foot.Visibility = sticky ? Visibility.Visible : Visibility.Collapsed;
+            glass.Padding = new Thickness(PanelPad - 1, PanelPad - 1, PanelPad - 1, bottom - 1);
             viewport.Width = vw; viewport.Height = vh;
-            viewport.Margin = new Thickness((pw - 2 * PanelPad - vw) / 2, 0, 0, 0);
-            panelHost.Width = pw; panelHost.Height = ph;
+            viewport.Margin = new Thickness((panelW - 2 * PanelPad - vw) / 2, 0, 0, 0);
+            panelHost.Width = panelW; panelHost.Height = panelH;
+        }
+
+        // Строит карточки по сосчитанной раскладке
+        void Build()
+        {
             glow.Children.Clear();
-            glow.Children.Add(Ui.Backdrop(pw, ph));
-            glow.Clip = new RectangleGeometry(new Rect(0, 0, pw, ph), Tokens.Radius.Block, Tokens.Radius.Block);
-            hint.Text = HintText();
+            glow.Children.Add(Ui.Backdrop(panelW, panelH));
+            glow.Clip = new RectangleGeometry(new Rect(0, 0, panelW, panelH), Tokens.Radius.Block, Tokens.Radius.Block);
 
             strip.Children.Clear();
             cards.Clear();
@@ -313,8 +434,7 @@ namespace DevTxt.Smena
                     Canvas.SetTop(row, (i / cols) * (cardH + Layout.Gap));
                     deck.Children.Add(row);
                 }
-                Card c = MakeCard(items[i], i);
-                c.Row = row;
+                Card c = MakeCard(items[i]);
                 c.Slot = new Grid { Width = cardW, Height = cardH, Children = { c.Root } };
                 Canvas.SetLeft(c.Slot, (i % cols) * (cardW + Layout.Gap));
                 row.Children.Add(c.Slot);
@@ -325,21 +445,22 @@ namespace DevTxt.Smena
             scrollMark.Visibility = scrolls ? Visibility.Visible : Visibility.Collapsed;
             if (scrolls)
             {
-                scrollMark.Height = (vh - 2 * Layout.Margin) * visibleRows / rows;
-                Canvas.SetLeft(scrollMark, vw - 5);
+                scrollMark.Height = (viewport.Height - 2 * Layout.Margin) * visibleRows / rows;
+                Canvas.SetLeft(scrollMark, viewport.Width - 5);
             }
         }
 
-        string HintText()
-        {
-            return sticky ? "Щёлкните окно или нажмите Enter  ·  Esc — отмена" : "Tab — дальше  ·  Shift+Tab — назад  ·  стрелки — выбор  ·  Esc — отмена";
-        }
-
-        Card MakeCard(WinItem item, int index)
+        Card MakeCard(WinItem item)
         {
             var c = new Card { Item = item };
             c.Hover = new Border { CornerRadius = new CornerRadius(Tokens.Radius.Row), Background = Brushes.Transparent };
-            c.Box = new Border { Width = preview, Height = thumbH, Margin = new Thickness(Layout.Pad, Layout.Pad, 0, 0), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top };
+            // Под каждым превью — ровная подложка: окно другой формы (узкое, широкое) стоит на ней по центру,
+            // и карточки выглядят одинаково
+            c.Box = new Border
+            {
+                Width = preview, Height = thumbH, Margin = new Thickness(Layout.Pad, Layout.Pad, 0, 0), HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top,
+                Background = Ui.Fill, CornerRadius = new CornerRadius(Tokens.Radius.Tip)
+            };
             if (item.Fake && !item.Minimized) c.Box.Child = Demo.Window(item, preview, thumbH);
 
             c.IconHost = new Border { Width = 18, Height = 18, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
@@ -350,7 +471,8 @@ namespace DevTxt.Smena
             caption.Children.Add(c.IconHost);
             caption.Children.Add(c.Title);
 
-            c.Root = new Grid { Width = cardW, Height = cardH, Background = Brushes.Transparent, Cursor = Cursors.Hand, RenderTransform = c.Scale, RenderTransformOrigin = new Point(0.5, 0.5), Children = { c.Hover, c.Box, caption } };
+            // Карточка не растёт и не ездит: на ней живое превью, а его Windows двигает отдельно от нашей картинки
+            c.Root = new Grid { Width = cardW, Height = cardH, Background = Brushes.Transparent, Cursor = Cursors.Hand, Children = { c.Hover, c.Box, caption } };
             c.Root.MouseEnter += delegate { if (cards.IndexOf(c) != session.Selected) c.Hover.Background = Ui.Fill; };
             c.Root.MouseLeave += delegate { c.Hover.Background = Brushes.Transparent; };
             c.Root.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
@@ -361,12 +483,19 @@ namespace DevTxt.Smena
                 session.Selected = at;
                 Commit();
             };
+            // Щелчок колёсиком закрывает окно, как на панели задач и во вкладках
+            c.Root.MouseDown += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (e.ChangedButton != MouseButton.Middle) return;
+                e.Handled = true;
+                try { CloseCard(cards.IndexOf(c)); } catch { Abort(); throw; }
+            };
             if (item.Minimized) NoPreview(c);
             SetIcon(c, item.Fake ? null : item.Icon ?? Win.Icon(item, Dispatcher, IconReady));
             return c;
         }
 
-        // Вместо превью — плитка с крупным значком: окно свёрнуто или Windows не дала его картинку
+        // Вместо превью — крупный значок на той же подложке: окно свёрнуто или Windows не дала его картинку
         void NoPreview(Card c)
         {
             if (c.BigIconHost != null) return;
@@ -378,7 +507,7 @@ namespace DevTxt.Smena
                 note.HorizontalAlignment = HorizontalAlignment.Center; note.Margin = new Thickness(0, 8, 0, 0);
                 col.Children.Add(note);
             }
-            c.Box.Child = new Border { CornerRadius = new CornerRadius(Tokens.Radius.Tip), Background = Ui.Fill, Child = col };
+            c.Box.Child = col;
             SetIcon(c, c.Item.Icon);
         }
 
@@ -398,7 +527,7 @@ namespace DevTxt.Smena
 
         // ───────── Выбор, прокрутка, появление ─────────
 
-        // Приводит картинку к выбранному окну: подсветка, размер карточки, прокрутка рядов
+        // Приводит картинку к выбранному окну: рамка подсветки и прокрутка рядов. Сама карточка остаётся как была.
         void Select(bool animate)
         {
             int sel = session.Selected;
@@ -408,25 +537,24 @@ namespace DevTxt.Smena
                 Card c = cards[i];
                 c.Title.Foreground = on ? Ui.Label : Ui.Label2;
                 if (on) c.Hover.Background = Brushes.Transparent;
-                double to = on ? SelectedScale : 1;
-                if (!animate || snap)
-                {
-                    c.Scale.BeginAnimation(ScaleTransform.ScaleXProperty, null); c.Scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
-                    c.Scale.ScaleX = c.Scale.ScaleY = to;
-                }
-                else if (Math.Abs(c.Scale.ScaleX - to) > 0.0005 || on)
-                {
-                    var a = new DoubleAnimation(to, TimeSpan.FromMilliseconds(Tokens.Motion.FastMs)) { EasingFunction = Ui.EaseOut };
-                    c.Scale.BeginAnimation(ScaleTransform.ScaleXProperty, a);
-                    c.Scale.BeginAnimation(ScaleTransform.ScaleYProperty, a);
-                }
             }
             firstRow = Layout.Scroll(firstRow, sel / cols, visibleRows, rows);
             tx = (sel % cols) * (cardW + Layout.Gap) - Layout.Grow;
             ty = (sel / cols) * (cardH + Layout.Gap) - Layout.Grow;
             tsy = firstRow * (cardH + Layout.Gap);
-            if (!animate || snap) { hx = tx; hy = ty; sy = tsy; hvx = hvy = svy = 0; }
+            if (animate && !snap)
+            {
+                // Подсветка и ряды доедут пружиной; кадры нужны, только пока они едут
+                if (hx != tx || hy != ty || sy != tsy) StartTicking();
+                return;
+            }
+            hx = tx; hy = ty; sy = tsy; hvx = hvy = svy = 0;
             Place();
+            if (revealed && IsVisible)
+            {
+                root.UpdateLayout();
+                SyncThumbs(true);
+            }
         }
 
         void Place()
@@ -440,29 +568,33 @@ namespace DevTxt.Smena
             }
         }
 
-        // Появление — общими приёмами dev.txt (Ui.cs, Motion): панель вырастает из середины и проявляется,
-        // карточки поднимаются волной: в одном ряду — одна за другой, в нескольких — ряд за рядом.
-        // При «Меньше движения» всё сразу на месте.
-        void Enter()
+        void StartTicking()
         {
-            panelHost.BeginAnimation(OpacityProperty, null);
-            dim.BeginAnimation(OpacityProperty, null);
-            panelHost.RenderTransform = null;
-            panelHost.Opacity = 1; dim.Opacity = 1;
-            if (snap) return;
-            dim.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(Tokens.Motion.FastMs)) { EasingFunction = Ui.EaseOut });
-            Motion.GrowFrom(panelHost, new Point(0.5, 0.5));
-            Motion.Stagger(deck.Children.Count == 1 ? (Panel)deck.Children[0] : deck);
+            if (ticking) return;
+            last = clock.Elapsed.TotalSeconds;
+            CompositionTarget.Rendering += Frame;
+            ticking = true;
         }
 
-        // Каждый кадр, пока переключатель на экране: пружины подсветки и прокрутки, затем превью встают на свои места
+        void StopTicking()
+        {
+            if (!ticking) return;
+            CompositionTarget.Rendering -= Frame;
+            ticking = false;
+        }
+
+        // Кадр. Вызывается, только пока что-то меняется: окно ждёт первого кадра, панель проявляется, едет подсветка
+        // или ряды. Всё встало — подписка снимается, и переключатель на экране не стоит процессору ничего.
         void Frame(object sender, EventArgs e)
         {
             try
             {
                 double now = clock.Elapsed.TotalSeconds, dt = now - last;
                 last = now;
-                if (hx != tx || hy != ty || sy != tsy)
+                // Первый кадр нового показа уже нарисован — окно можно открывать
+                if (awaiting && ++frames >= 2) Uncloak();
+                bool moving = hx != tx || hy != ty || sy != tsy, scrolling = sy != tsy;
+                if (moving)
                 {
                     Layout.Spring(ref hx, ref hvx, tx, Tokens.Motion.SpringFadeStiffness, Tokens.Motion.SpringFadeDamping, dt);
                     Layout.Spring(ref hy, ref hvy, ty, Tokens.Motion.SpringFadeStiffness, Tokens.Motion.SpringFadeDamping, dt);
@@ -471,35 +603,42 @@ namespace DevTxt.Smena
                     if (Math.Abs(hy - ty) < 0.3 && Math.Abs(hvy) < 2) { hy = ty; hvy = 0; }
                     if (Math.Abs(sy - tsy) < 0.3 && Math.Abs(svy) < 2) { sy = tsy; svy = 0; }
                     Place();
-                    strip.UpdateLayout();
+                    if (scrolling) strip.UpdateLayout();
                 }
-                SyncThumbs();
+                // Места превью пересчитываются, только когда едут ряды; иначе меняется разве что прозрачность
+                SyncThumbs(scrolling);
+                if (!moving && !awaiting && now >= fadeEnd) StopTicking();
             }
             catch { Abort(); }
         }
 
-        // Ставит каждое живое превью туда, где сейчас его карточка: с учётом увеличения, подъёма, прокрутки и прозрачности.
-        // Windows рисует превью сама, поверх нашего окна; мы только говорим, где и какую часть.
-        void SyncThumbs()
+        // Говорит Windows, где стоит каждое живое превью и насколько оно прозрачно (как панель). Windows рисует превью сама,
+        // поверх нашего окна. geometry — пересчитать места (после раскладки или прокрутки рядов); иначе берутся сосчитанные.
+        void SyncThumbs(bool geometry)
         {
             if (hwnd == IntPtr.Zero || cards.Count == 0) return;
-            Rect vp = viewport.TransformToAncestor(root).TransformBounds(new Rect(0, 0, viewport.Width, viewport.Height));
-            double shown = panelHost.Opacity;
+            int opacity = (int)Math.Round(255 * Math.Max(0, Math.Min(1, panelHost.Opacity)));
+            Rect vp = new Rect();
+            bool measured = false;
             foreach (Card c in cards)
             {
                 if (c.Thumb == IntPtr.Zero) continue;
-                Rect b = c.Box.TransformToAncestor(root).TransformBounds(new Rect(0, 0, preview, thumbH));
-                double x, y, w, h;
-                Layout.Fit(c.Source.Right - c.Source.Left, c.Source.Bottom - c.Source.Top, b.X * scale, b.Y * scale, b.Width * scale, b.Height * scale, 1, out x, out y, out w, out h);
-                double dl = x, dt = y, dr = x + w, db = y + h, sl = c.Source.Left, st = c.Source.Top, sr = c.Source.Right, sb = c.Source.Bottom;
-                bool visible = Layout.Clip(ref dl, ref dt, ref dr, ref db, ref sl, ref st, ref sr, ref sb, vp.Left * scale, vp.Top * scale, vp.Right * scale, vp.Bottom * scale);
-                int opacity = (int)Math.Round(255 * Math.Max(0, Math.Min(1, shown * c.Slot.Opacity * c.Row.Opacity)));
-                var d = new Win.RECT { Left = (int)Math.Round(dl), Top = (int)Math.Round(dt), Right = (int)Math.Round(dr), Bottom = (int)Math.Round(db) };
-                var src = new Win.RECT { Left = (int)Math.Round(sl), Top = (int)Math.Round(st), Right = (int)Math.Round(sr), Bottom = (int)Math.Round(sb) };
-                visible = visible && opacity > 0;
-                if (visible == c.LastVisible && opacity == c.LastOpacity && Same(d, c.LastDest) && Same(src, c.LastSource)) continue;
-                Win.ThumbUpdate(c.Thumb, d, src, (byte)opacity, visible);
-                c.LastVisible = visible; c.LastOpacity = opacity; c.LastDest = d; c.LastSource = src;
+                if (geometry || !c.Placed)
+                {
+                    if (!measured) { vp = viewport.TransformToAncestor(root).TransformBounds(new Rect(0, 0, viewport.Width, viewport.Height)); measured = true; }
+                    Rect b = c.Box.TransformToAncestor(root).TransformBounds(new Rect(0, 0, preview, thumbH));
+                    double x, y, w, h;
+                    Layout.Fit(c.Source.Right - c.Source.Left, c.Source.Bottom - c.Source.Top, b.X * scale, b.Y * scale, b.Width * scale, b.Height * scale, 1, out x, out y, out w, out h);
+                    double dl = x, dt = y, dr = x + w, db = y + h, sl = c.Source.Left, st = c.Source.Top, sr = c.Source.Right, sb = c.Source.Bottom;
+                    c.InView = Layout.Clip(ref dl, ref dt, ref dr, ref db, ref sl, ref st, ref sr, ref sb, vp.Left * scale, vp.Top * scale, vp.Right * scale, vp.Bottom * scale);
+                    c.Dest = new Win.RECT { Left = (int)Math.Round(dl), Top = (int)Math.Round(dt), Right = (int)Math.Round(dr), Bottom = (int)Math.Round(db) };
+                    c.Part = new Win.RECT { Left = (int)Math.Round(sl), Top = (int)Math.Round(st), Right = (int)Math.Round(sr), Bottom = (int)Math.Round(sb) };
+                    c.Placed = true;
+                }
+                bool visible = c.InView && opacity > 0;
+                if (visible == c.LastVisible && opacity == c.LastOpacity && Same(c.Dest, c.LastDest) && Same(c.Part, c.LastSource)) continue;
+                Win.ThumbUpdate(c.Thumb, c.Dest, c.Part, (byte)opacity, visible);
+                c.LastVisible = visible; c.LastOpacity = opacity; c.LastDest = c.Dest; c.LastSource = c.Part;
             }
         }
 
@@ -514,7 +653,9 @@ namespace DevTxt.Smena
             items = Demo.Windows(DemoCount);
             sticky = stay;
             snap = true;
-            Arrange(w, h);
+            firstRow = 0;
+            Measure(w, h);
+            Build();
             session.Begin(items.Count, cols, true, false);
             if (select >= 0 && select < items.Count) session.Selected = select;
             Select(false);

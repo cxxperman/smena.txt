@@ -48,6 +48,9 @@ namespace DevTxt.Smena
         [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
         [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr hwnd);
         [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern IntPtr GetLastActivePopup(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool IsWindowEnabled(IntPtr hwnd);
+        [DllImport("user32.dll")] static extern bool PostMessage(IntPtr hwnd, uint msg, IntPtr w, IntPtr l);
         [DllImport("user32.dll")] static extern bool ShowWindowAsync(IntPtr hwnd, int cmd);
         [DllImport("user32.dll")] static extern bool AttachThreadInput(uint from, uint to, bool attach);
         [DllImport("user32.dll")] static extern bool GetCursorPos(out POINT p);
@@ -67,6 +70,7 @@ namespace DevTxt.Smena
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool QueryFullProcessImageName(IntPtr process, int flags, StringBuilder name, ref int size);
         [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out int value, int size);
         [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT value, int size);
+        [DllImport("dwmapi.dll")] static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
         [DllImport("dwmapi.dll")] static extern int DwmRegisterThumbnail(IntPtr dest, IntPtr source, out IntPtr thumb);
         [DllImport("dwmapi.dll")] static extern int DwmUnregisterThumbnail(IntPtr thumb);
         [DllImport("dwmapi.dll")] static extern int DwmQueryThumbnailSourceSize(IntPtr thumb, out SIZE size);
@@ -84,9 +88,9 @@ namespace DevTxt.Smena
         class VirtualDesktopManager { }
 
         const int GWL_STYLE = -16, GWL_EXSTYLE = -20, GCLP_HICON = -14;
-        const long WS_CAPTION = 0x00C00000;
-        const uint GW_OWNER = 4;
-        const int SW_RESTORE = 9, DWMWA_FRAME = 9, DWMWA_CLOAKED = 14, CLOAKED_SHELL = 2;
+        const long WS_CAPTION = 0x00C00000, WS_MAXIMIZE = 0x01000000, WS_THICKFRAME = 0x00040000;
+        const uint GW_OWNER = 4, WM_SYSCOMMAND = 0x0112;
+        const int SW_RESTORE = 9, DWMWA_FRAME = 9, DWMWA_CLOAK = 13, DWMWA_CLOAKED = 14, CLOAKED_SHELL = 2, SC_CLOSE = 0xF060;
         const string FrameClass = "ApplicationFrameWindow";
         public const int MaskKey = 0xE8;   // клавиша, которой нет ни на одной клавиатуре
         public static readonly IntPtr OurInput = new IntPtr(0x534D454E);   // пометка «это нажатие послали мы сами»
@@ -97,6 +101,28 @@ namespace DevTxt.Smena
         static readonly Dictionary<IntPtr, Known> known = new Dictionary<IntPtr, Known>();   // чьё окно — узнаём один раз
         static IVirtualDesktopManager desktops;
         static bool desktopsFailed;
+
+        // Какими окнами пользовались недавно; пополняется в Watch, когда впереди оказывается новое окно
+        public static readonly Recent Used = new Recent();
+
+        // Окно и его владельцы по порядку: диалог, окно, которое его открыло, и так далее
+        static List<IntPtr> OwnerChain(IntPtr hwnd)
+        {
+            var chain = new List<IntPtr>();
+            for (int i = 0; i < 8 && hwnd != IntPtr.Zero && !chain.Contains(hwnd); i++)
+            {
+                chain.Add(hwnd);
+                hwnd = GetWindow(hwnd, GW_OWNER);
+            }
+            return chain;
+        }
+
+        // Окно вышло вперёд: оно само — самое недавнее, сразу за ним его владельцы
+        static void Seen(IntPtr hwnd)
+        {
+            List<IntPtr> chain = OwnerChain(hwnd);
+            for (int i = chain.Count - 1; i >= 0; i--) Used.Touch(chain[i]);
+        }
 
         static string Text(IntPtr hwnd)
         {
@@ -187,7 +213,8 @@ namespace DevTxt.Smena
             return list;
         }
 
-        // Окна для переключателя: отобраны, с путём к программе; окно, в котором человек сейчас, — первое.
+        // Окна для переключателя: отобраны, с путём к программе, от недавнего к давнему; окно, в котором человек сейчас, —
+        // первое. Если впереди диалог или всплывающее окно, которого в списке нет, «текущим» считается его владелец.
         public static List<WinItem> List(bool allDesktops, bool desktops, out bool foregroundFirst)
         {
             var raw = Logic.Filter(Enumerate(desktops && allDesktops), Self, allDesktops);
@@ -216,7 +243,8 @@ namespace DevTxt.Smena
                 known.Clear();
                 foreach (var kv in next) known[kv.Key] = kv.Value;
             }
-            foregroundFirst = Logic.ForegroundFirst(list, GetForegroundWindow());
+            Used.Sort(list);
+            foregroundFirst = Logic.ForegroundFirst(list, Logic.Listed(list, OwnerChain(GetForegroundWindow())));
             return list;
         }
 
@@ -233,11 +261,13 @@ namespace DevTxt.Smena
             return new RECT { Right = (int)SystemParameters.PrimaryScreenWidth, Bottom = (int)SystemParameters.PrimaryScreenHeight };
         }
 
-        // Впереди окно на весь свой монитор и без заголовка (игра, видео)? Рабочий стол и панель задач не в счёт.
+        // Впереди окно ровно на весь свой монитор, без заголовка и рамки, не развёрнутое (игра, видео)?
+        // Рабочий стол и панель задач не в счёт.
         // Вызывается из потока перехватчика: только быстрые вопросы к Windows, ни одного — к самой программе.
         public static bool FullscreenAhead() { return Fullscreen(GetForegroundWindow()); }
 
-        // Окно на весь экран без заголовка — игра или видео. Невидимые слои поверх экрана (оверлей NVIDIA, ввод Windows,
+        // Окно на весь экран — игра или видео. Развёрнутое окно без заголовка (Steam, Electron) игрой не считается:
+        // из-за таких окон Alt+Tab отдавался системе. Невидимые слои поверх экрана (оверлей NVIDIA, ввод Windows,
         // прозрачные окна, которые не берут фокус) игрой не считаются: из-за них Alt+Tab отдавался системе через раз.
         public static bool Fullscreen(IntPtr fg)
         {
@@ -255,26 +285,30 @@ namespace DevTxt.Smena
                 if (!GetWindowRect(fg, out r)) return false;
                 var info = new MONITORINFO { Size = Marshal.SizeOf(typeof(MONITORINFO)) };
                 if (!GetMonitorInfo(MonitorFromWindow(fg, 2), ref info)) return false;
-                bool caption = (GetWindowLongPtr(fg, GWL_STYLE).ToInt64() & WS_CAPTION) == WS_CAPTION;
+                long style = GetWindowLongPtr(fg, GWL_STYLE).ToInt64();
+                bool caption = (style & WS_CAPTION) == WS_CAPTION;
                 RECT m = info.Monitor;
-                return Logic.IsFullscreen(r.Left, r.Top, r.Right, r.Bottom, m.Left, m.Top, m.Right, m.Bottom, caption);
+                return Logic.IsFullscreen(r.Left, r.Top, r.Right, r.Bottom, m.Left, m.Top, m.Right, m.Bottom, caption, (style & WS_MAXIMIZE) != 0, (style & WS_THICKFRAME) != 0);
             }
             catch { return false; }
         }
 
         public static bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
-        // ───────── Сторож: системный Alt+Tab открылся, хотя должен был наш ─────────
+        // ───────── Сторож: какое окно впереди; системный Alt+Tab открылся, хотя должен был наш ─────────
         public delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time);
         [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr module, WinEventProc proc, uint pid, uint thread, uint flags);
         [DllImport("advapi32.dll")] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
         [DllImport("advapi32.dll")] static extern bool GetTokenInformation(IntPtr token, int cls, out int value, int size, out int length);
         static WinEventProc watchProc;   // ссылка хранится, чтобы сборщик мусора не убрал её из-под Windows
 
-        // Вызывает seen(окно, что было впереди), когда на экране появился системный переключатель окон при зажатом Alt.
+        // Следит за тем, какое окно впереди: так складывается порядок «от недавнего к давнему» (Used).
+        // Заодно зовёт systemSwitcher(окно, что было впереди), когда на экране появился системный переключатель окон
+        // при зажатом Alt; systemSwitcher может не быть.
         // Работает в потоке окна: события приходят через его очередь сообщений и ничего не тормозят.
-        public static void WatchSystemSwitcher(Action<IntPtr> seen)
+        public static void Watch(Action<IntPtr> systemSwitcher)
         {
+            if (watchProc != null) return;
             IntPtr before = IntPtr.Zero;
             DateTime last = DateTime.MinValue;
             watchProc = delegate(IntPtr h, uint ev, IntPtr hwnd, int obj, int child, uint thread, uint time)
@@ -282,22 +316,25 @@ namespace DevTxt.Smena
                 try
                 {
                     if (obj != 0) return;   // OBJID_WINDOW: само окно, а не что-то внутри него
+                    if (ev == 0x0016) { Used.Forget(hwnd); return; }   // EVENT_SYSTEM_MINIMIZESTART: свёрнутое уходит в конец, как в Windows
                     bool system = ev == 0x0014;   // EVENT_SYSTEM_SWITCHSTART
                     if (ev == 0x0003)             // EVENT_SYSTEM_FOREGROUND
                     {
                         string cls = Class(hwnd);
                         system = cls == "XamlExplorerHostIslandWindow" || cls == "MultitaskingViewFrame" || cls == "TaskSwitcherWnd";
-                        if (!system) { before = hwnd; return; }
+                        if (!system) { before = hwnd; Seen(hwnd); return; }
                     }
-                    if (!system || !KeyDown(KeyMachine.Alt)) return;   // Win+Tab и прочее — не наше дело
+                    if (systemSwitcher == null || !system || !KeyDown(KeyMachine.Alt)) return;   // Win+Tab и прочее — не наше дело
                     if ((DateTime.UtcNow - last).TotalMilliseconds < 800) return;   // одно открытие — одно сообщение
                     last = DateTime.UtcNow;
-                    seen(before);
+                    systemSwitcher(before);
                 }
                 catch { }
             };
             SetWinEventHook(0x0003, 0x0003, IntPtr.Zero, watchProc, 0, 0, 2);   // WINEVENT_OUTOFCONTEXT | SKIPOWNPROCESS
             SetWinEventHook(0x0014, 0x0014, IntPtr.Zero, watchProc, 0, 0, 2);
+            SetWinEventHook(0x0016, 0x0016, IntPtr.Zero, watchProc, 0, 0, 2);
+            Seen(GetForegroundWindow());
         }
 
         // Окно программы, запущенной от администратора. Пока такое окно впереди, Windows не показывает обычным
@@ -343,7 +380,14 @@ namespace DevTxt.Smena
             SetWindowPos(hwnd, new IntPtr(-1), r.Left, r.Top, r.Right - r.Left, r.Bottom - r.Top, 0x0010);   // SWP_NOACTIVATE
         }
 
-        // ───────── Вывести окно вперёд ─────────
+        // Прячет окно от глаз, не трогая его самого (и обратно). Спрятанное так окно рисуется как обычно, поэтому показать
+        // его можно уже с готовой картинкой — без кадра, оставшегося с прошлого раза.
+        public static void Cloak(IntPtr hwnd, bool on)
+        {
+            try { int value = on ? 1 : 0; DwmSetWindowAttribute(hwnd, DWMWA_CLOAK, ref value, sizeof(int)); } catch { }
+        }
+
+        // ───────── Вывести окно вперёд, закрыть окно ─────────
 
         // Нажатие и отпускание клавиши, которой не существует. Нужно дважды:
         // 1) пока Alt зажат — чтобы программа под нами не открыла своё меню, когда Alt отпустят («Alt был с чем-то»);
@@ -362,26 +406,54 @@ namespace DevTxt.Smena
         }
 
         // Выводит окно вперёд; свёрнутое разворачивает. true — окно действительно стало передним.
+        // Если у окна открыт диалог, вперёд выходит он: само окно под ним всё равно не отвечает.
         // На что опираемся, по порядку:
-        //  1. обычный SetForegroundWindow — Windows разрешает его, пока человек держит или только что отпустил Alt+Tab;
-        //  2. не вышло — посылаем пустое нажатие (последний ввод теперь наш) и пробуем снова;
-        //  3. не вышло — на время присоединяемся к очереди ввода переднего окна (AttachThreadInput) и пробуем ещё раз.
+        //  1. посылаем пустое нажатие (последний ввод теперь наш — Windows разрешает менять переднее окно тому, от кого
+        //     он пришёл) и зовём SetForegroundWindow;
+        //  2. не вышло — на время присоединяемся к очереди ввода переднего окна (AttachThreadInput) и пробуем ещё раз.
         public static bool Activate(IntPtr hwnd)
         {
             if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return false;
             if (IsIconic(hwnd)) ShowWindowAsync(hwnd, SW_RESTORE);
-            if (SetForegroundWindow(hwnd) && GetForegroundWindow() == hwnd) return true;
+            IntPtr to = hwnd;
+            try
+            {
+                IntPtr popup = GetLastActivePopup(hwnd);
+                if (popup != IntPtr.Zero && popup != hwnd && IsWindow(popup) && IsWindowVisible(popup)) to = popup;
+            }
+            catch { }
             SendMask();
-            if (SetForegroundWindow(hwnd) && GetForegroundWindow() == hwnd) return true;
+            if (SetForegroundWindow(to) && GetForegroundWindow() == to) { Seen(to); return true; }
             uint pid, me = GetCurrentThreadId(), other = GetWindowThreadProcessId(GetForegroundWindow(), out pid);
             bool attached = other != 0 && other != me && AttachThreadInput(me, other, true);
             try
             {
-                BringWindowToTop(hwnd);
-                SetForegroundWindow(hwnd);
+                BringWindowToTop(to);
+                SetForegroundWindow(to);
             }
             finally { if (attached) AttachThreadInput(me, other, false); }
-            return GetForegroundWindow() == hwnd;
+            bool front = GetForegroundWindow() == to;
+            if (front) Seen(to);
+            return front;
+        }
+
+        // Просит окно закрыться — так же, как крестик в заголовке: программа может переспросить про несохранённое.
+        // Если окно ждёт ответа в своём диалоге, просьба уходит диалогу.
+        public static void Close(IntPtr hwnd)
+        {
+            try
+            {
+                if (hwnd == IntPtr.Zero || !IsWindow(hwnd)) return;
+                IntPtr to = hwnd;
+                if (!IsWindowEnabled(hwnd))
+                {
+                    IntPtr popup = GetLastActivePopup(hwnd);
+                    if (popup != IntPtr.Zero && IsWindow(popup) && IsWindowVisible(popup)) to = popup;
+                }
+                PostMessage(to, WM_SYSCOMMAND, new IntPtr(SC_CLOSE), IntPtr.Zero);
+                Used.Forget(hwnd);
+            }
+            catch { }
         }
 
         // ───────── Живые превью ─────────

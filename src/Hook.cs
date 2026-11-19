@@ -35,13 +35,13 @@ namespace DevTxt.Smena
         static volatile IntPtr handle;
         static KeyMachine machine;
         static Dispatcher ui;
-        static Action<KeyAction> act;
+        static Action<KeyAction, int> act;   // действие и номер переключения, к которому оно относится
 
         public static bool Allowed;   // false — перехватчик не ставится никогда (--no-hook, --headless, --demo, проверки)
         public static bool Installed { get { return handle != IntPtr.Zero; } }
         public static int Refreshes;   // сколько раз перехватчик ставился заново без перерыва (для журнала и проверок)
 
-        public static void Setup(KeyMachine m, Dispatcher dispatcher, Action<KeyAction> handler)
+        public static void Setup(KeyMachine m, Dispatcher dispatcher, Action<KeyAction, int> handler)
         {
             machine = m; ui = dispatcher; act = handler;
         }
@@ -147,8 +147,9 @@ namespace DevTxt.Smena
                             other = (GetAsyncKeyState(KeyMachine.Ctrl) & 0x8000) != 0 || (GetAsyncKeyState(KeyMachine.LWin) & 0x8000) != 0 || (GetAsyncKeyState(KeyMachine.RWin) & 0x8000) != 0;
                         }
                         KeyAction action;
-                        bool eat = machine.Key(vk, scan, down, (flags & LLKHF_ALTDOWN) != 0, shift, other, out action);
-                        if (action != KeyAction.None) ui.BeginInvoke(DispatcherPriority.Send, act, action);
+                        int gen;
+                        bool eat = machine.Key(vk, scan, down, (flags & LLKHF_ALTDOWN) != 0, shift, other, out action, out gen);
+                        if (action != KeyAction.None) ui.BeginInvoke(DispatcherPriority.Send, act, action, gen);
                         if (eat) return new IntPtr(1);
                     }
                 }
