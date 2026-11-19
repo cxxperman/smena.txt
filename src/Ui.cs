@@ -147,13 +147,15 @@ namespace DevTxt
         public static Brush Tinted(Color c) { return Solid(c); }
 
         // Рамка фокуса с клавиатуры: двойная обводка вокруг элемента, как в Windows
-        public static readonly Style Focus = MakeFocus();
-        static Style MakeFocus()
+        public static readonly Style Focus = MakeFocus(Tokens.Radius.Control + 3);
+        // Та же рамка с другим скруглением — для круглых и капсульных элементов
+        public static Style FocusRound(double radius) { return MakeFocus(radius + 3); }
+        static Style MakeFocus(double radius)
         {
             var border = new FrameworkElementFactory(typeof(Border));
             border.SetValue(Border.BorderThicknessProperty, new Thickness(2));
             border.SetValue(Border.BorderBrushProperty, Label);
-            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(Tokens.Radius.Control + 3));
+            border.SetValue(Border.CornerRadiusProperty, new CornerRadius(radius));
             border.SetValue(FrameworkElement.MarginProperty, new Thickness(-3));
             var style = new Style();
             style.Setters.Add(new Setter(Control.TemplateProperty, new ControlTemplate { VisualTree = border }));
@@ -511,6 +513,13 @@ namespace DevTxt
             var a = new DoubleAnimation(k, TimeSpan.FromMilliseconds(Tokens.Motion.FastMs)) { EasingFunction = Ui.EaseOut };
             knobScale.BeginAnimation(ScaleTransform.ScaleXProperty, a);
             knobScale.BeginAnimation(ScaleTransform.ScaleYProperty, a);
+        }
+
+        // Недоступный переключатель: приглушён, не нажимается и не берёт фокус
+        public bool Enabled
+        {
+            get { return Root.IsHitTestVisible; }
+            set { Root.IsHitTestVisible = value; Root.Focusable = value; Root.Opacity = value ? 1 : 0.5; }
         }
 
         public bool Value
@@ -1023,6 +1032,13 @@ namespace DevTxt
             list.Children.Add(new Border { Padding = new Thickness(10, 5, 10, 6), Child = what });
         }
 
+        // Подпись группы пунктов («Окна», «Питание»)
+        public void Caption(string text)
+        {
+            var t = Ui.T(text, Tokens.Size.Caption, Ui.Label3, FontWeights.SemiBold);
+            list.Children.Add(new Border { Padding = new Thickness(10, 6, 10, 4), Child = t });
+        }
+
         public void Line()
         {
             list.Children.Add(new Border { Height = 1, Margin = new Thickness(-4, 4, -4, 4), Background = Ui.Separator });
@@ -1034,6 +1050,8 @@ namespace DevTxt
             bool enabled = action != null;
             var text = Ui.T(label, Tokens.Size.Body, enabled ? Ui.Label : Ui.Label3, FontWeights.Normal);
             text.VerticalAlignment = VerticalAlignment.Center;
+            text.MaxWidth = 320;                                  // длинная подпись (заголовок окна) обрезается «…»
+            if (label != null && label.Length > 40) text.ToolTip = label;
             var row = new DockPanel { LastChildFill = true };
             // галочка — слева, как в меню Windows; место под неё есть у всех строк, чтобы подписи стояли ровно
             var mark = new TextBlock { Text = check ? "\uE73E" : "", FontFamily = Ui.IconFont, FontSize = Tokens.Size.Caption, Foreground = Ui.Label, VerticalAlignment = VerticalAlignment.Center, Width = 28 };
