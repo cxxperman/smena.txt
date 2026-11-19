@@ -685,10 +685,8 @@ namespace DevTxt
                 int n = i;
                 var t = new TextBlock { Text = labels[i], FontSize = Tokens.Size.Body, FontFamily = Ui.TextFont, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
                 var b = new Border { Height = 34, MinWidth = 44, CornerRadius = new CornerRadius(Tokens.Radius.Control), Padding = new Thickness(12, 0, 12, 2), Child = t, Background = Brushes.Transparent, Margin = new Thickness(i == 0 ? 0 : 2, 0, 0, 0) };
-                int n = rows.Count;
-                rows.Add(b); acts.Add(action);
-                b.MouseEnter += delegate { Mark(n); };   // курсор и стрелки двигают одну и ту же подсветку
-                b.MouseLeave += delegate { if (marked == n) Mark(-1); };
+                b.MouseEnter += delegate { b.Background = Ui.Fill; };
+                b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
                 b.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e) { e.Handled = true; Pick(n); };
                 items.Add(b);
                 strip.Children.Add(b);
@@ -1027,8 +1025,10 @@ namespace DevTxt
             var b = new Border { Height = RowH, CornerRadius = new CornerRadius(Tokens.Radius.Tip), Padding = new Thickness(10, 0, 10, 1), Background = Brushes.Transparent, Child = row };
             if (enabled)
             {
-                b.MouseEnter += delegate { b.Background = Ui.Fill; };
-                b.MouseLeave += delegate { b.Background = Brushes.Transparent; };
+                int slot = rows.Count;
+                rows.Add(b); acts.Add(action);
+                b.MouseEnter += delegate { Mark(slot); };   // курсор и стрелки двигают одну и ту же подсветку
+                b.MouseLeave += delegate { if (marked == slot) Mark(-1); };
                 b.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
                 {
                     e.Handled = true;
