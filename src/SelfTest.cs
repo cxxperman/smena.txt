@@ -422,6 +422,108 @@ namespace DevTxt.Smena
             Check(AppHub.ReadReduced(HubLink.Msg("mode", "dark", "accent", null, "reducedMotion", true)), "reducedMotion: true is read");
             Check(!AppHub.ReadReduced(HubLink.Msg("mode", "dark", "reducedMotion", false)) && !AppHub.ReadReduced(HubLink.Msg("reducedMotion", "yes")) && !AppHub.ReadReduced(null) && !AppHub.ReadReduced("x"), "anything else is not reduced motion");
 
+            // ── Семья dev.txt: страница «Игры» в core.txt, общий трей, клавиши, свой значок ──
+            Prefs.Reset();
+            s = AppHub.Settings();
+            Check(Item(s, "games")["section"] as string == "games", "«Не вмешиваться в играх» goes to the «Игры» page of core.txt");
+            foreach (string key in new string[] { "replace", "sameApp", "allDesktops", "size" }) Check(!Item(s, key).ContainsKey("section"), key + " stays on the smena page of core.txt");
+            back = new JavaScriptSerializer().DeserializeObject(new JavaScriptSerializer().Serialize(s)) as Dictionary<string, object>;
+            Check(back != null && Item(back, "games")["section"] as string == "games" && Item(back, "games")["key"] as string == "games", "the section survives JSON, the key stays the same");
+
+            var tray = AppHub.Tray();
+            Check(tray.Count == 2 && tray.Count <= Family.MaxTray, "two quick items for the core.txt tray, no more than four");
+            var showItem = tray[0].ToData();
+            var pauseItem = tray[1].ToData();
+            Check(showItem["key"] as string == "show" && showItem["label"] as string == "Открыть" && !showItem.ContainsKey("check") && !showItem.ContainsKey("enabled"), "the first item is «Открыть», a plain action");
+            Check(pauseItem["key"] as string == "pause" && pauseItem["label"] as string == "Приостановить" && pauseItem["check"] is bool && !(bool)pauseItem["check"], "«Приостановить» is a check item, unchecked while not paused");
+            foreach (TrayItem t in tray)
+                Check(t.Run != null && t.Enabled && t.Label.IndexOf(Program.Id, StringComparison.OrdinalIgnoreCase) < 0 && Array.IndexOf(new string[] { "autostart", "startup", "update", "updates", "focus", "dnd", "core", "exit", "quit" }, t.Key) < 0,
+                    "tray item «" + t.Label + "»: no app name and nothing the shared menu already has");
+            fired = 0;
+            Prefs.Changed += count;
+            tray[1].Run();
+            Check(Prefs.Paused && fired == 1 && (bool)AppHub.Tray()[1].ToData()["check"], "running «pause» pauses, announces it, and the next tray state carries the check");
+            tray[1].Run();
+            Check(!Prefs.Paused && fired == 2 && !(bool)AppHub.Tray()[1].ToData()["check"], "…and running it again resumes");
+            Prefs.Changed -= count;
+            int opened = 0;
+            AppHub.Open = delegate { opened++; };
+            tray[0].Run();
+            AppHub.Open = null;
+            Check(opened == 1 && !Throws(delegate { tray[0].Run(); }), "«Открыть» opens the window; without a window it does nothing");
+
+            var keyList = AppHub.Keys();
+            Check(keyList.Count == 2 && keyList[0].Id == "switch" && keyList[0].Label == "Переключение окон" && keyList[0].Keys == "Alt+Tab"
+                && keyList[1].Id == "sameApp" && keyList[1].Label == "Окна того же приложения" && keyList[1].Keys == "Alt+`", "keys for core.txt: Alt+Tab and Alt+`, got " + keyList[0].Keys + " and " + keyList[1].Keys);
+            Check(KeyNames.Normal(keyList[0].Keys) == keyList[0].Keys && KeyNames.Normal(keyList[1].Keys) == keyList[1].Keys && KeyNames.Normal("tab + ALT") == "Alt+Tab", "the combinations are written the family way");
+            Check(keyList[0].On && keyList[1].On, "both keys are on by default");
+            Prefs.SameApp = false;
+            Check(AppHub.Keys()[0].On && !AppHub.Keys()[1].On, "Alt+` switched off: only it is off");
+            Prefs.SameApp = true; Prefs.Replace = false;
+            Check(!AppHub.Keys()[0].On && !AppHub.Keys()[1].On, "replacement switched off: both keys are off");
+            Prefs.Replace = true; Prefs.Paused = true;
+            Check(!AppHub.Keys()[0].On && !AppHub.Keys()[1].On, "paused: both keys are off");
+            Prefs.Reset();
+            Check((string)keyList[0].ToData()["keys"] == "Alt+Tab" && keyList[0].ToData()["on"] is bool, "a key goes to the hub as id, label, keys, on");
+
+            // Семья на клиенте без хаба: своё остаётся своим, tray.run попадает в пункты трея, свой значок не прячется
+            var fl = new HubLink(Program.Id, Program.Name, Program.VersionText, 9);
+            fl.Topics = new string[] { "hub.theme" };
+            fl.Commands = new string[] { "settings.set", "show" };
+            fl.OnCommand = delegate(string name, Dictionary<string, object> a, string from) { return "own " + name; };
+            var fam = new Family(fl, Program.Id);
+            Check(Array.IndexOf(fl.Topics, "hub.theme") >= 0 && Array.IndexOf(fl.Topics, Family.Topic) >= 0 && Array.IndexOf(fl.Topics, "hub.apps") >= 0, "the family listens to core.family and hub.apps on top of hub.theme");
+            Check(Array.IndexOf(fl.Commands, "settings.set") >= 0 && Array.IndexOf(fl.Commands, "show") >= 0 && Array.IndexOf(fl.Commands, Family.TrayRun) >= 0, "tray.run is added to the own commands");
+            Check(!fam.HideOwnTray && !fam.CoreOnline && !fam.IslandOnline && !fam.Notify("smena.txt", "проверка", false) && !fam.SetFocus(true, 0), "no hub: the own tray icon stays, nothing goes to core.txt or the island");
+            fam.SetTray(AppHub.Tray());
+            fam.SetKeys(AppHub.Keys());
+            fl.OnCommand(Family.TrayRun, HubLink.Msg("key", "pause"), "core");
+            Check(Prefs.Paused, "tray.run «pause» reaches the pause item");
+            fl.OnCommand(Family.TrayRun, HubLink.Msg("key", "pause"), "core");
+            Check(!Prefs.Paused, "…and runs it again");
+            Check(Throws(delegate { fl.OnCommand(Family.TrayRun, HubLink.Msg("key", "exit"), "core"); }) && Throws(delegate { fl.OnCommand(Family.TrayRun, new Dictionary<string, object>(), "core"); }), "an unknown or missing tray key is refused");
+            Check(fl.OnCommand("settings.set", HubLink.Msg("key", "games", "value", true), "core") as string == "own settings.set", "other commands still reach the own handler");
+            Check(!AppHub.HideOwnTray && !AppHub.CoreKnown, "before the hub link starts nothing hides the own tray icon");
+
+            // Свой значок в трее: core.txt держит общий — не нужен; связь пропала — сразу нужен; после запуска ждём core.txt недолго
+            var own = new OwnTray(false);
+            Check(own.Visible(false, false) && !own.Waiting, "core.txt not installed: the icon shows at once");
+            Check(!own.Visible(true, true), "core.txt holds the one icon: own icon hidden");
+            Check(own.Visible(false, false), "the link drops: own icon is back at once");
+            Check(own.Visible(true, false), "core.txt online but the tray is not his: own icon stays");
+            own = new OwnTray(true);
+            Check(!own.Visible(false, false) && own.Waiting, "core.txt installed: right after start the icon waits for it");
+            Check(!own.Visible(true, true) && !own.Waiting, "core.txt answers that it holds the icon: hidden, no more waiting");
+            Check(own.Visible(false, false), "…and when the link drops the icon is back at once, without waiting again");
+            own = new OwnTray(true);
+            Check(!own.Visible(false, false), "core.txt silent: still waiting");
+            own.Expire();
+            Check(own.Visible(false, false) && !own.Waiting, "…the wait runs out: the icon shows, it never stays hidden");
+            Check(!own.Visible(true, true), "core.txt that comes later still takes the icon");
+            own = new OwnTray(true);
+            Check(own.Visible(true, false), "core.txt answers that the tray is not his: the icon shows without waiting the rest");
+            Check(OwnTray.Wait > TimeSpan.Zero && OwnTray.Wait <= TimeSpan.FromSeconds(3), "the start-up wait is short: about three seconds at most");
+
+            // Команда «show»: без страницы — переключатель, как всегда; со страницей — окно, а не переключатель во весь экран.
+            // core.txt со страницы «Клавиши» шлёт { page: "keys" } — это страница smena.txt в core.txt, где включаются оба сочетания.
+            Check(ShowRoute.For(null, true) == ShowTarget.Switcher && ShowRoute.For(new Dictionary<string, object>(), true) == ShowTarget.Switcher
+                && ShowRoute.For(HubLink.Msg("page", null), true) == ShowTarget.Switcher, "show without a page opens the switcher, as before");
+            Check(ShowRoute.For(HubLink.Msg("page", "keys"), true) == ShowTarget.CorePage, "show {page: keys} with core.txt online: the smena page of core.txt, where both keys are switched");
+            Check(ShowRoute.For(HubLink.Msg("page", "keys"), false) == ShowTarget.About, "…and without core.txt: the window");
+            foreach (object page in new object[] { "games", "general", "app:smena", "", 5, true })
+                Check(ShowRoute.For(HubLink.Msg("page", page), true) == ShowTarget.About && ShowRoute.For(HubLink.Msg("page", page), false) == ShowTarget.About,
+                    "show with page «" + page + "»: the window, never the full-screen switcher");
+            int switched = 0, windows = 0;
+            AppHub.Show = delegate { switched++; return true; };
+            AppHub.Open = delegate { windows++; };
+            var shown = AppHub.ShowCommand(HubLink.Msg("page", "keys"));
+            Check(windows == 1 && switched == 0 && (bool)shown["shown"] && shown["opened"] as string == "about", "show {page: keys} without a hub link opens the window, not the switcher");
+            shown = AppHub.ShowCommand(new Dictionary<string, object>());
+            Check(switched == 1 && windows == 1 && (bool)shown["shown"] && shown["opened"] as string == "switcher", "a bare show still opens the switcher");
+            AppHub.Show = null; AppHub.Open = null;
+            Check(!Throws(delegate { shown = AppHub.ShowCommand(HubLink.Msg("page", "games")); }) && !(bool)shown["shown"] && shown["opened"] as string == "about"
+                && !(bool)AppHub.ShowCommand(null)["shown"], "no window and no switcher (--headless): nothing is shown and nothing throws");
+
             // Настройки переживают запись и чтение; «Приостановить» на диск не попадает
             string dir = Path.Combine(Path.GetTempPath(), Program.Id + "-test-" + System.Diagnostics.Process.GetCurrentProcess().Id);
             Environment.SetEnvironmentVariable("SMENA_DATA", dir);

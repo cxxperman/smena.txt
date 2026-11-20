@@ -1,5 +1,6 @@
 // smena.txt. Model.cs — всё, что решается без экрана и без клавиатуры: какие окна показывать и в каком порядке,
-// куда сдвигается выбор, что значит каждая клавиша, когда Alt+Tab остаётся системным, сколько рядов и что видно.
+// куда сдвигается выбор, что значит каждая клавиша, когда Alt+Tab остаётся системным, сколько рядов и что видно,
+// нужен ли свой значок в трее, что открывает команда «show».
 // Здесь нет обращений к Windows — поэтому всё это проверяется в --selftest.
 using System;
 using System.Collections.Generic;
@@ -125,6 +126,49 @@ namespace DevTxt.Smena
         public static bool LeaveAlone(bool paused, bool replace, bool notInGames, bool fullscreen)
         {
             return paused || !replace || (notInGames && fullscreen);
+        }
+    }
+
+    // Нужен ли свой значок в трее. Пока core.txt на связи и держит один значок на всех (core.family.tray) — нет;
+    // связь пропала или core.txt значок не держит — да, сразу. Сразу после запуска, если core.txt установлен, значок
+    // ждёт его ответа не дольше Wait, чтобы не мигнуть при входе в Windows; не ответил — значок появляется.
+    // Без входа приложение не остаётся никогда.
+    class OwnTray
+    {
+        public static readonly TimeSpan Wait = TimeSpan.FromSeconds(3);
+        bool waiting;
+
+        public OwnTray(bool coreInstalled) { waiting = coreInstalled; }
+
+        // Ещё ждём первого ответа core.txt
+        public bool Waiting { get { return waiting; } }
+
+        // Время вышло, а core.txt так и не ответил
+        public void Expire() { waiting = false; }
+
+        // coreKnown — core.txt на связи и сказал, что у семьи (core.family); hideOwn — значок он держит за всех
+        public bool Visible(bool coreKnown, bool hideOwn)
+        {
+            if (coreKnown) waiting = false;   // ответ пришёл: ждать больше нечего
+            return !hideOwn && !waiting;
+        }
+    }
+
+    // Что открывает команда «show»
+    enum ShowTarget { Switcher, About, CorePage }
+
+    // Без страницы «show» один раз показывает переключатель «до щелчка» — попробовать без клавиатуры, как было всегда.
+    // Со страницей просят окно (core.txt со страницы «Клавиши» шлёт { page: "keys" }), а не переключатель во весь экран,
+    // где Enter переводит в выбранное окно, а Delete его закрывает. «keys» ведёт на страницу smena.txt в core.txt:
+    // оба сочетания включаются и выключаются там. Нет core.txt или страница другая — окно «О программе».
+    static class ShowRoute
+    {
+        // coreShows — core.txt на связи и понимает «show»
+        public static ShowTarget For(Dictionary<string, object> args, bool coreShows)
+        {
+            object page;
+            if (args == null || !args.TryGetValue("page", out page) || page == null) return ShowTarget.Switcher;
+            return page as string == "keys" && coreShows ? ShowTarget.CorePage : ShowTarget.About;
         }
     }
 

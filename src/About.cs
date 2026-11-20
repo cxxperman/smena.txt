@@ -111,7 +111,8 @@ namespace DevTxt.Smena
             if (online) hub.Set("Настройки — в core.txt", Status.Kind.Ok);
             else if (CoreApp.Installed) hub.Set("core.txt не запущен — всё работает и без него", Status.Kind.None);
             else hub.Set(CoreApp.Pitch, Status.Kind.None);
-            coreBtn.Set(CoreApp.Label(online), online || CoreApp.Installed ? (Color?)null : Tokens.Palette.Brand, true, delegate { if (!demo) CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
+            // Запущенный core.txt открывается сразу на странице настроек smena.txt
+            coreBtn.Set(CoreApp.Label(online), online || CoreApp.Installed ? (Color?)null : Tokens.Palette.Brand, true, delegate { if (!demo) CoreApp.Go(AppHub.Online, delegate { AppHub.ShowCore(AppHub.SettingsPage); }); });
         }
 
         public void ShowWindow()
@@ -119,7 +120,10 @@ namespace DevTxt.Smena
             Render();
             Show();
             if (WindowState == WindowState.Minimized) WindowState = WindowState.Normal;
-            Activate();
+            // По «Открыть» в меню core.txt или по команде хаба впереди чужая программа, и Windows может не пустить окно
+            // вперёд: оно откроется позади других или только мигнёт на панели задач. Тогда — тем же способом, каким
+            // переключатель выводит вперёд выбранное окно.
+            if (!Activate() && !demo) Win.Activate(new WindowInteropHelper(this).Handle);
         }
 
         // Рисует окно в файл PNG, не показывая его на экране

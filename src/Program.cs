@@ -7,7 +7,9 @@
 //                       --size ШxВ — размер «экрана», --about — нарисовать окно «О программе»
 //   --selftest          проверить отбор и порядок окон, клавиши, раскладку, настройки; код выхода 0 — всё в порядке
 //   --headless          без трея и без окон: только связь с хабом (для проверок протокола). Перехватчик не ставится.
+//                       Что было бы со своим значком в трее (виден, ждёт core.txt, спрятан), пишется строкой в вывод.
 //   --no-hook           работать как обычно, но перехватчик клавиш не ставить; переключатель открывается только командой «show»
+//                       без страницы и кнопкой «Показать»
 //   --probe [файл]      сосчитать настоящие окна, попробовать завести живое превью на спрятанном окне, написать одну строку и выйти
 // Для проверок же: SMENA_HUB_PORT — хаб на другом порту, SMENA_DATA — другая папка для настроек.
 using System;
@@ -134,10 +136,14 @@ namespace DevTxt.Smena
             AppHub.Show = switcher.OpenSticky;
             AppHub.Start(app.Dispatcher);
 
+            // Без трея решение о своём значке принимается так же — и пишется строкой: так связь с core.txt проверяется без экрана
+            if (headless) Tray.Follow(Say);
+
             if (!headless)
             {
                 var about = new AboutWindow(false);
                 about.Try = delegate { about.Hide(); switcher.OpenSticky(); };
+                AppHub.Open = about.ShowWindow;   // «Открыть» в меню core.txt, пока своего значка нет
                 Tray.Start(about, delegate
                 {
                     Quitting = true;
@@ -183,6 +189,18 @@ namespace DevTxt.Smena
             GC.KeepAlive(mutex);
             return 0;
         }
+
+        // --headless: что сейчас со своим значком в трее — строкой в стандартный вывод, в UTF-8
+        static TextWriter said;
+        static void Say(bool shown)
+        {
+            try
+            {
+                if (said == null) said = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)) { AutoFlush = true };
+                said.WriteLine("свой значок в трее: " + (shown ? "виден" : Tray.Waiting ? "ждёт ответа core.txt" : "спрятан — его держит core.txt"));
+            }
+            catch { }
+        }
     }
 
     // Журнал: что пошло не так с Alt+Tab и почему. Лежит рядом с настройками, не больше ~200 КБ.
@@ -204,10 +222,18 @@ namespace DevTxt.Smena
         }
     }
 
-    // Значок в трее и его меню
+    // Значок в трее и его меню. Пока core.txt на связи и держит один значок на всех, своего нет: «Открыть» и
+    // «Приостановить» стоят в меню core.txt (AppHub.Tray). Связь пропала — значок сразу снова здесь, с полным меню.
     static class Tray
     {
         static System.Windows.Forms.NotifyIcon icon;
+        static OwnTray rule;
+        static DispatcherTimer wait;
+        static Action<bool> apply;
+        static int last = -1;   // что решили в прошлый раз: 0 — спрятан, 1 — ждёт core.txt, 2 — виден
+
+        // Ещё ждём первого ответа core.txt после запуска
+        public static bool Waiting { get { return rule != null && rule.Waiting; } }
 
         public static void Start(AboutWindow about, Action quit)
         {
@@ -216,7 +242,7 @@ namespace DevTxt.Smena
                 icon = new System.Windows.Forms.NotifyIcon
                 {
                     Icon = System.Drawing.Icon.ExtractAssociatedIcon(System.Reflection.Assembly.GetExecutingAssembly().Location),
-                    Visible = true
+                    Visible = false   // покажет Follow, как только станет ясно, что значок не у core.txt
                 };
                 // Меню Windows 11, а не серое меню WinForms. Настройки лежат на общей странице в core.txt;
                 // если он не запущен — окно «О программе» так и скажет
@@ -227,7 +253,7 @@ namespace DevTxt.Smena
                     menu.Brand(Program.Sprite, Program.Id);
                     menu.Item("Открыть smena.txt", false, about.ShowWindow);
                     menu.Item("Приостановить", Prefs.Paused, delegate { Prefs.SetPaused(!Prefs.Paused); });
-                    menu.Item("Настройки", false, delegate { if (AppHub.Online) AppHub.ShowCore(); else about.ShowWindow(); });
+                    menu.Item("Настройки", false, delegate { if (AppHub.Online) AppHub.ShowCore(AppHub.SettingsPage); else about.ShowWindow(); });
                     menu.Item(CoreApp.Label(AppHub.Online), false, delegate { CoreApp.Go(AppHub.Online, AppHub.ShowCore); });
                     menu.Line();
                     menu.Item("Выход", false, quit);
@@ -238,6 +264,35 @@ namespace DevTxt.Smena
                 Render();
             }
             catch { icon = null; }
+            Follow(delegate(bool on) { if (icon != null && icon.Visible != on) icon.Visible = on; });
+        }
+
+        // Следит, нужен ли свой значок (правило — OwnTray), и зовёт show(виден) в потоке окна, когда решение меняется.
+        // Сразу после запуска, если core.txt установлен, ждёт его ответа не дольше OwnTray.Wait — потом значок появляется.
+        public static void Follow(Action<bool> show)
+        {
+            if (rule != null) return;
+            apply = show;
+            rule = new OwnTray(CoreApp.Installed);
+            if (rule.Waiting)
+            {
+                wait = new DispatcherTimer { Interval = OwnTray.Wait };
+                wait.Tick += delegate { rule.Expire(); Sync(); };
+                wait.Start();
+            }
+            AppHub.FamilyChanged += Sync;
+            Sync();
+        }
+
+        static void Sync()
+        {
+            if (rule == null) return;
+            bool on = rule.Visible(AppHub.CoreKnown, AppHub.HideOwnTray);
+            if (!rule.Waiting && wait != null) { wait.Stop(); wait = null; }
+            int now = on ? 2 : rule.Waiting ? 1 : 0;
+            if (now == last) return;
+            last = now;
+            try { if (apply != null) apply(on); } catch { }
         }
 
         static void Render()
@@ -248,6 +303,8 @@ namespace DevTxt.Smena
 
         public static void Stop()
         {
+            if (wait != null) { wait.Stop(); wait = null; }
+            AppHub.FamilyChanged -= Sync;
             try { if (icon != null) { icon.Visible = false; icon.Dispose(); } } catch { }
             icon = null;
         }

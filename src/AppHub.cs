@@ -1,9 +1,12 @@
 // smena.txt. AppHub.cs — связь с core.txt, лаунчером dev.txt™. Он держит на этом компьютере хаб (127.0.0.1:42080).
 // Приложение отдаёт туда настройки — они появляются на общей странице настроек в core.txt — и принимает оттуда
-// изменения. Оттуда же приходит общий вид: «Меньше движения» для всех приложений разом. Команда «show» один раз
-// показывает переключатель, чтобы его можно было попробовать без клавиатуры.
+// изменения. Оттуда же приходит общий вид: «Меньше движения» для всех приложений разом. Команда «show» без страницы
+// один раз показывает переключатель, чтобы его можно было попробовать без клавиатуры; со страницей — окно (ShowRoute).
+// Семья dev.txt (Family.cs): пока core.txt на связи и держит один значок в трее на всех, своего значка нет —
+// «Открыть» и «Приостановить» smena.txt стоят в его меню (smena.tray), а оба сочетания клавиш — на его странице
+// «Клавиши» (smena.keys). «Не вмешиваться в играх» core.txt показывает на своей странице «Игры».
 // core.txt может быть не запущен — это нормально: приложение работает само и тихо пробует подключиться снова.
-// Протокол описан в kit.txt (hub/PROTOCOL.md); HubLink.cs скопирован оттуда как есть.
+// Протокол описан в kit.txt (hub/PROTOCOL.md); HubLink.cs и Family.cs скопированы оттуда как есть.
 using System;
 using System.Collections.Generic;
 using System.Windows.Threading;
@@ -13,14 +16,25 @@ namespace DevTxt.Smena
     static class AppHub
     {
         public const string Topic = Program.Id + ".settings";
+        public const string SettingsPage = "app:" + Program.Id;   // страница настроек smena.txt в core.txt
+        const int AltMod = 1, Grave = 0xC0;                        // Alt — как у RegisterHotKey; клавиша над Tab (VK_OEM_3)
 
         static HubLink link;
+        static Family family;
         static Dispatcher ui;
         static int published;
 
-        public static Func<bool> Show;              // показать переключатель: команда «show»; true — показан
+        public static Func<bool> Show;              // показать переключатель: команда «show» без страницы; true — показан
+        public static Action Open;                  // открыть окно «О программе»: «Открыть» в трее core.txt, «show» со страницей
         public static event Action StatusChanged;   // связь появилась или пропала; вызывается в потоке окна
+        public static event Action FamilyChanged;   // core.txt сообщил новое core.family или связь пропала; в потоке окна
         public static bool Online { get { return link != null && link.Online; } }
+
+        // core.txt на связи и сказал, что сейчас у семьи (core.family)
+        public static bool CoreKnown { get { return family != null && family.CoreOnline; } }
+
+        // Свой значок в трее не нужен: core.txt на связи и показывает один значок на всех
+        public static bool HideOwnTray { get { return family != null && family.HideOwnTray; } }
 
         // Для проверок: хаб на другом порту, рядом с настоящим core.txt
         public static int TestPort
@@ -29,13 +43,15 @@ namespace DevTxt.Smena
         }
 
         // Описание настроек — в том виде, в каком его ждёт core.txt: всегда целиком.
+        // «Не вмешиваться в играх» помечена section: "games" — core.txt показывает её на своей странице «Игры»,
+        // рядом с тем, что делают в играх остальные приложения. Ключ и значение те же.
         public static Dictionary<string, object> Settings()
         {
             var keys = new object[]
             {
                 HubLink.Msg("key", "replace", "type", "switch", "label", "Заменять Alt+Tab", "hint", "Вместо системного переключателя окон открывается этот", "value", Prefs.Replace),
                 HubLink.Msg("key", "sameApp", "type", "switch", "label", "Alt+` — окна того же приложения", "hint", "Клавиша над Tab перебирает окна программы, в которой вы сейчас", "value", Prefs.SameApp),
-                HubLink.Msg("key", "games", "type", "switch", "label", "Не вмешиваться в играх", "hint", "Когда впереди игра или другое окно на весь экран, работает обычный Alt+Tab", "value", Prefs.Games)
+                HubLink.Msg("key", "games", "type", "switch", "label", "Не вмешиваться в играх", "hint", "Когда впереди игра или другое окно на весь экран, работает обычный Alt+Tab", "value", Prefs.Games, "section", "games")
             };
             var view = new object[]
             {
@@ -43,6 +59,39 @@ namespace DevTxt.Smena
                 HubLink.Msg("key", "size", "type", "slider", "label", "Размер превью", "value", Prefs.Size, "min", Layout.MinPreview, "max", Layout.MaxPreview, "step", Layout.StepPreview, "unit", "px")
             };
             return HubLink.Msg("groups", new object[] { HubLink.Msg("title", "Клавиши", "items", keys), HubLink.Msg("title", "Вид", "items", view) });
+        }
+
+        // Быстрые пункты для общего меню в трее core.txt: самое частое, без имени приложения — оно стоит над ними.
+        // Run зовётся в потоке хаба: окно и настройки трогаются только в потоке окна.
+        public static List<TrayItem> Tray()
+        {
+            return new List<TrayItem>
+            {
+                new TrayItem("show", "Открыть", null, delegate { OnUi(delegate { if (Open != null) Open(); }); }),
+                new TrayItem("pause", "Приостановить", Prefs.Paused, delegate { OnUi(delegate { Prefs.SetPaused(!Prefs.Paused); }); })
+            };
+        }
+
+        // Сочетания для общей страницы «Клавиши» в core.txt. Работают, пока замена Alt+Tab включена и не приостановлена;
+        // сочетание с клавишей над Tab — ещё и пока включены окна того же приложения.
+        public static List<KeyInfo> Keys()
+        {
+            bool on = Prefs.Replace && !Prefs.Paused;
+            return new List<KeyInfo>
+            {
+                new KeyInfo("switch", "Переключение окон", KeyNames.Text(AltMod, KeyMachine.Tab), on),
+                new KeyInfo("sameApp", "Окна того же приложения", KeyNames.Text(AltMod, Grave), on && Prefs.SameApp)
+            };
+        }
+
+        // Выполнить в потоке окна и дождаться: ответ на команду уходит, когда всё уже сделано и разослано.
+        // Без окна (проверки) — прямо здесь.
+        static void OnUi(Action a)
+        {
+            if (ui == null || ui.CheckAccess()) { a(); return; }
+            Exception failed = null;
+            ui.Invoke(new Action(delegate { try { a(); } catch (Exception e) { failed = e; } }));
+            if (failed != null) throw failed;
         }
 
         static bool Number(object value, out double n)
@@ -98,6 +147,9 @@ namespace DevTxt.Smena
                 ui.BeginInvoke(new Action(delegate { Ui.ForceReducedMotion = reduced; }));
             };
             link.OnStatus = delegate(bool on) { ui.BeginInvoke(new Action(delegate { if (StatusChanged != null) StatusChanged(); })); };
+            // Семья: core.family, hub.apps и tray.run. Встаёт поверх своих обработчиков — и до link.Start()
+            family = new Family(link, Program.Id);
+            family.Changed = delegate { ui.BeginInvoke(new Action(delegate { if (FamilyChanged != null) FamilyChanged(); })); };
             Prefs.Changed += Publish;   // настройку поменяли — страница в core.txt тоже обновится
             link.Start();
             Publish();                  // хаба ещё нет — клиент запомнит и повторит после подключения
@@ -112,12 +164,35 @@ namespace DevTxt.Smena
         {
             published++;
             if (link != null) link.State(Topic, Settings());
+            // Галочка «Приостановить» и включённость клавиш зависят от тех же настроек; одинаковое Family второй раз не шлёт
+            if (family != null) { family.SetTray(Tray()); family.SetKeys(Keys()); }
         }
 
-        // Просьба к core.txt показать своё окно — там общая страница настроек
-        public static void ShowCore()
+        // Просьба к core.txt показать своё окно; page — какую страницу (SettingsPage — настройки smena.txt)
+        public static void ShowCore() { ShowCore(null); }
+
+        public static void ShowCore(string page)
         {
-            if (link != null) link.Command("core", "show", null);
+            if (link != null) link.Command("core", "show", page == null ? null : HubLink.Msg("page", page));
+        }
+
+        // Команда «show»: что открыть, решает ShowRoute. Вызывается в потоке окна.
+        // В ответе shown — показано ли что-нибудь, opened — что: switcher, about или core (страница smena.txt в core.txt).
+        public static Dictionary<string, object> ShowCommand(Dictionary<string, object> args)
+        {
+            ShowTarget to = ShowRoute.For(args, family != null && family.Has("core", "show"));
+            if (to == ShowTarget.CorePage)
+            {
+                ShowCore(SettingsPage);
+                return HubLink.Msg("shown", true, "opened", "core");
+            }
+            if (to == ShowTarget.About)
+            {
+                bool can = Open != null;   // без окна (--headless) открыть нечего
+                if (can) Open();
+                return HubLink.Msg("shown", can, "opened", "about");
+            }
+            return HubLink.Msg("shown", Show != null && Show(), "opened", "switcher");
         }
 
         // Приходит в фоновом потоке
@@ -129,7 +204,7 @@ namespace DevTxt.Smena
             {
                 try
                 {
-                    if (name == "show") { result = HubLink.Msg("shown", Show != null && Show()); return; }
+                    if (name == "show") { result = ShowCommand(args); return; }
                     object key, value;
                     args.TryGetValue("key", out key);
                     args.TryGetValue("value", out value);

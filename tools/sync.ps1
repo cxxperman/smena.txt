@@ -7,7 +7,9 @@ if (-not (Test-Path "$Kit\tokens\tokens.json")) { throw "Это не папка 
 $files = @(
     @('dist\Tokens.cs', 'Tokens.cs'),
     @('ui\Ui.cs', 'Ui.cs'),
-    @('hub\HubLink.cs', 'HubLink.cs')
+    @('hub\HubLink.cs', 'HubLink.cs'),
+    @('hub\Family.cs', 'Family.cs'),
+    @('hub\CoreApp.cs', 'CoreApp.cs')
 )
 foreach ($f in $files) {
     Copy-Item (Join-Path $Kit $f[0]) (Join-Path $src $f[1]) -Force

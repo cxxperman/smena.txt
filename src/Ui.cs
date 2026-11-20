@@ -966,6 +966,7 @@ namespace DevTxt
     {
         const double Shadow = 18, RowH = 32;
         readonly StackPanel list = new StackPanel();
+        readonly ScrollViewer scroll;
         readonly Border box;
         bool closing;
 
@@ -986,8 +987,10 @@ namespace DevTxt
             {
                 Margin = new Thickness(Shadow), MinWidth = 196, CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Ui.Solid(Tokens.Dark.Menu),
                 Effect = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = Shadow, ShadowDepth = 4, Direction = 270, Opacity = 0.4, Color = Colors.Black },
-                Child = new Border { CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Brushes.Transparent, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), Padding = new Thickness(4), Child = list }
+                Child = new Border { CornerRadius = new CornerRadius(Tokens.Radius.Block), Background = Brushes.Transparent, BorderBrush = Ui.Rim, BorderThickness = new Thickness(1), Padding = new Thickness(4),
+                    Child = scroll = new ScrollViewer { Content = list, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Focusable = false } }
             };
+            Ui.Styles(Resources);   // тонкая полоса прокрутки, если пунктов больше, чем влезает на экран
             Content = box;
             Deactivated += delegate { Shut(); };
             KeyDown += delegate(object s, KeyEventArgs e)
@@ -1039,9 +1042,29 @@ namespace DevTxt
             list.Children.Add(new Border { Padding = new Thickness(10, 6, 10, 4), Child = t });
         }
 
+        // Подпись раздела со значком — например, приложение в общем меню трея core.txt
+        public void Caption(string[] sprite, string text)
+        {
+            var t = Ui.T(text, Tokens.Size.Caption, Ui.Label3, FontWeights.SemiBold);
+            t.VerticalAlignment = VerticalAlignment.Center;
+            t.Margin = new Thickness(6, 0, 0, 0);
+            var line = new StackPanel { Orientation = Orientation.Horizontal };
+            if (sprite != null) { var icon = Ui.Sprite(sprite, 14); icon.VerticalAlignment = VerticalAlignment.Center; line.Children.Add(icon); }
+            else t.Margin = new Thickness(0);
+            line.Children.Add(t);
+            list.Children.Add(new Border { Padding = new Thickness(10, 6, 10, 4), Child = line });
+        }
+
         public void Line()
         {
             list.Children.Add(new Border { Height = 1, Margin = new Thickness(-4, 4, -4, 4), Background = Ui.Separator });
+        }
+
+        // Меню выше экрана прокручивается, а не уходит за край
+        void FitHeight(double screenHeight)
+        {
+            scroll.MaxHeight = Math.Max(RowH * 3, screenHeight - 2 * Shadow - 16);
+            box.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         }
 
         // Строка меню. check — показать галочку справа; action == null — строка недоступна.
@@ -1078,7 +1101,7 @@ namespace DevTxt
         // Показывает меню над точкой (cx, bottom) — в единицах WPF, в координатах экрана; за края рабочей области не вылезает
         public void ShowAbove(double cx, double bottom, Rect work)
         {
-            box.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            FitHeight(bottom - work.Top);
             double w = box.DesiredSize.Width, h = box.DesiredSize.Height;
             Left = Math.Max(work.Left - Shadow + 4, Math.Min(work.Right + Shadow - 4 - w, cx - w / 2));
             Top = Math.Max(work.Top, bottom - h + Shadow);
@@ -1114,7 +1137,7 @@ namespace DevTxt
             ReleaseDC(IntPtr.Zero, dc);
             if (k <= 0) k = 1;
             double x = p.X / k, y = p.Y / k;
-            box.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            FitHeight(SystemParameters.WorkArea.Height);
             double w = box.DesiredSize.Width, h = box.DesiredSize.Height;
             double left = SystemParameters.VirtualScreenLeft, top = SystemParameters.VirtualScreenTop;
             double right = left + SystemParameters.VirtualScreenWidth;
