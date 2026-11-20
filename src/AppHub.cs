@@ -25,6 +25,7 @@ namespace DevTxt.Smena
         static int published;
 
         public static Func<bool> Show;              // показать переключатель: команда «show» без страницы; true — показан
+        public static Action Quit;                  // закрыть smena.txt: «Закрыть» в трее core.txt, пока своего значка нет
         public static Action Open;                  // открыть окно «О программе»: «Открыть» в трее core.txt, «show» со страницей
         public static event Action StatusChanged;   // связь появилась или пропала; вызывается в потоке окна
         public static event Action FamilyChanged;   // core.txt сообщил новое core.family или связь пропала; в потоке окна
@@ -148,7 +149,7 @@ namespace DevTxt.Smena
             };
             link.OnStatus = delegate(bool on) { ui.BeginInvoke(new Action(delegate { if (StatusChanged != null) StatusChanged(); })); };
             // Семья: core.family, hub.apps и tray.run. Встаёт поверх своих обработчиков — и до link.Start()
-            family = new Family(link, Program.Id);
+            family = new Family(link, Program.Id, delegate { ui.BeginInvoke(new Action(delegate { if (Quit != null) Quit(); })); });
             family.Changed = delegate { ui.BeginInvoke(new Action(delegate { if (FamilyChanged != null) FamilyChanged(); })); };
             Prefs.Changed += Publish;   // настройку поменяли — страница в core.txt тоже обновится
             link.Start();

@@ -144,14 +144,16 @@ namespace DevTxt.Smena
                 var about = new AboutWindow(false);
                 about.Try = delegate { about.Hide(); switcher.OpenSticky(); };
                 AppHub.Open = about.ShowWindow;   // «Открыть» в меню core.txt, пока своего значка нет
-                Tray.Start(about, delegate
+                Action quit = delegate
                 {
                     Quitting = true;
                     Hook.Stop();
                     AppHub.Stop();
                     Tray.Stop();
                     app.Shutdown();
-                });
+                };
+                AppHub.Quit = quit;   // «Закрыть» в меню core.txt
+                Tray.Start(about, quit);
                 var show = new EventWaitHandle(false, EventResetMode.AutoReset, "devtxt_" + Id + "_show");
                 new Thread(delegate() { while (true) { show.WaitOne(); app.Dispatcher.BeginInvoke(new Action(about.ShowWindow)); } }) { IsBackground = true }.Start();
                 if (Hook.Allowed)
