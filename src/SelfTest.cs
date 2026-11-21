@@ -1138,6 +1138,7 @@ namespace DevTxt.Smena
             Check(!Logic.MayTouch(gameShown) && !Logic.MayTouch(gameMin) && Logic.MayTouch(ordinary) && !Logic.MayTouch(null), "a game window gets no capture, no thumbnail, no icon from its process");
             Check(!Logic.Gentle(false, false, false) && Logic.Gentle(true, false, false) && Logic.Gentle(false, true, false) && Logic.Gentle(false, false, true), "plain activation only: aside, from a game or into a game");
             Check(Logic.KeysOn(true, false, false) && !Logic.KeysOn(true, false, true) && !Logic.KeysOn(true, true, false) && !Logic.KeysOn(false, false, false), "keys are on only when replacing, not paused and not aside");
+            Check(!Win.GameFront(IntPtr.Zero) && Logic.GameWindow(true, false, "cs2.exe", null) && Logic.GameWindow(true, false, "DOTA2", null) && !Logic.GameWindow(true, false, "notepad", null), "a game in front is known by its process name even when its window is not fullscreen");
             Check(Logic.AsideText(AsideReason.AntiCheat).Length > 0 && Logic.AsideText(AsideReason.Fullscreen).Length > 0 && Logic.AsideText(AsideReason.Core).Length > 0 && Logic.AsideText(AsideReason.None) == "", "every reason has its words");
 
             Prefs.Reset();

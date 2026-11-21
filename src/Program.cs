@@ -235,7 +235,7 @@ namespace DevTxt.Smena
             }
 
             var machine = new KeyMachine();
-            machine.LeaveAlone = delegate { return Aside.On || Logic.LeaveAlone(Prefs.Paused, Prefs.Replace, Prefs.Games, Prefs.Games && Win.FullscreenAhead()); };
+            machine.LeaveAlone = delegate { return Aside.On || Logic.LeaveAlone(Prefs.Paused, Prefs.Replace, Prefs.Games, Prefs.Games && Win.GameFrontAhead()); };
             machine.SameApp = delegate { return Prefs.SameApp; };
             switcher.Machine = machine;
 

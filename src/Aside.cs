@@ -129,8 +129,8 @@ namespace DevTxt.Smena
 
         public static volatile bool On;               // smena.txt в стороне (читается из любого потока)
         public static Func<bool> CoreGame;            // core.txt сказал, что идёт игра (core.family.game); в потоке опроса
-        public static Func<bool> Fullscreen = Win.FullscreenAhead;   // впереди окно на весь экран; в потоке опроса
-        public static Func<IntPtr, bool> FullscreenWindow = Win.Fullscreen;   // это окно на весь экран; в потоке окна
+        public static Func<bool> Fullscreen = Win.GameFrontAhead;   // впереди игра или окно на весь экран; в потоке опроса
+        public static Func<IntPtr, bool> FullscreenWindow = Win.GameFront;   // это окно — игра или на весь экран; в потоке окна
         public static event Action Changed;           // вошли, вышли или сменился повод; в потоке окна
         public static int Polls;
 

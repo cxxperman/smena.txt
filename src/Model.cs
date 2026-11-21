@@ -190,7 +190,7 @@ namespace DevTxt.Smena
         public static string AsideText(AsideReason r)
         {
             if (r == AsideReason.AntiCheat) return "Идёт игра с античитом";
-            if (r == AsideReason.Fullscreen) return "Впереди окно на весь экран";
+            if (r == AsideReason.Fullscreen) return "Впереди игра или окно на весь экран";
             if (r == AsideReason.Core) return "Идёт игра";
             return "";
         }

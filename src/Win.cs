@@ -339,6 +339,24 @@ namespace DevTxt.Smena
         // Вызывается из потока перехватчика: только быстрые вопросы к Windows, ни одного — к самой программе.
         public static bool FullscreenAhead() { return Fullscreen(GetForegroundWindow()); }
 
+        // Это окно — повод отойти в сторону: на весь экран или игра по имени процесса (Games.IsGame). Игра в окне,
+        // развёрнутая без рамки или чуть больше монитора под «на весь экран» не подходит — её выдаёт только имя.
+        public static bool GameFront(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return false;
+            if (Fullscreen(hwnd)) return true;
+            try
+            {
+                uint pid;
+                GetWindowThreadProcessId(hwnd, out pid);
+                return pid != Self && Games.IsGame(Procs.NameOf(pid), Prefs.Extra);
+            }
+            catch { return false; }
+        }
+
+        // Впереди игра или окно на весь экран
+        public static bool GameFrontAhead() { return GameFront(GetForegroundWindow()); }
+
         // Окно на весь экран — игра или видео. Развёрнутое окно без заголовка (Steam, Electron) игрой не считается:
         // из-за таких окон Alt+Tab отдавался системе. Невидимые слои поверх экрана (оверлей NVIDIA, ввод Windows,
         // прозрачные окна, которые не берут фокус) игрой не считаются: из-за них Alt+Tab отдавался системе через раз.
