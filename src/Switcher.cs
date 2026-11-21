@@ -40,7 +40,8 @@ namespace DevTxt.Smena
     class Switcher : Window
     {
         const double PanelPad = 14, Footer = 30, Shadow = 40;
-        const int RevealMs = 150;   // столько держат Alt после Tab, прежде чем панель появится; быстрее — переключение без панели
+        public const int RevealMs = 150;   // столько держат Alt после Tab, прежде чем панель появится; быстрее — переключение без панели
+        public const string StickyHint = "Щёлкните окно или нажмите Enter  ·  Delete — закрыть окно  ·  Esc — отмена";
 
         readonly bool demo, headless;
         readonly Session session = new Session();
@@ -67,8 +68,20 @@ namespace DevTxt.Smena
         double sy, svy, tsy;               // прокрутка рядов
         double last, fadeEnd;
         bool ticking;
+        FlipView flip;                      // объёмные виды: своё окно сцены; логика показа остаётся здесь
+        bool flipping;                      // этот показ идёт стопкой, а не сеткой
+        readonly System.Diagnostics.Stopwatch revealClock = new System.Diagnostics.Stopwatch();   // от начала показа до порога
+        bool revealWatch;                   // порог показа проверяется и в кадрах (RevealTick)
 
-        public KeyMachine Machine;          // клавиши; может не быть (--demo, снимки)
+        KeyMachine machine;
+        public KeyMachine Machine           // клавиши; может не быть (--demo, снимки)
+        {
+            get { return machine; }
+            set { machine = value; if (Guard != null) Guard.Machine = value; }
+        }
+        public StallGuard Guard;            // сторож потока окна (Stall.cs); нет в --headless и в снимках
+        int stale = -1;                     // действия перехватчика с таким номером переключения и раньше — из времени, когда поток окна висел
+        bool opening;                       // показ командой собирается: сторож не трогает «открыто командой» у KeyMachine
         public Action Finished;             // переключатель закрылся
         public static int DemoCount = 9;
         public int LastCount;               // сколько окон было в последнем показе
@@ -142,16 +155,7 @@ namespace DevTxt.Smena
 
             // Панель появляется не сразу: быстрый Alt+Tab успевает закончиться раньше и обходится без неё
             revealTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(RevealMs) };
-            revealTimer.Tick += delegate
-            {
-                revealTimer.Stop();
-                try
-                {
-                    if (!session.Open || revealed) return;
-                    if (!sticky && !Win.KeyDown(KeyMachine.Alt)) Commit(); else Reveal();
-                }
-                catch { Abort(); throw; }
-            };
+            revealTimer.Tick += delegate { RevealDue(); };
 
             // Если кадры почему-то не идут, спрятанным окно не остаётся
             uncloakGuard = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
@@ -177,9 +181,83 @@ namespace DevTxt.Smena
         {
             hwnd = new WindowInteropHelper(this).EnsureHandle();
             Win.Style(hwnd, true);
+            Win.NoTransitions(hwnd);
             var src = HwndSource.FromHwnd(hwnd);
             if (src != null && src.CompositionTarget != null) scale = src.CompositionTarget.TransformToDevice.M11;
             if (scale <= 0) scale = 1;
+            if (headless) return;
+            // Окно объёмной сцены тоже готово заранее; Switcher — её хозяин: всё, что делают мышь и клавиши, решается здесь
+            flip = new FlipView();
+            flip.Prepare();
+            // Сторож: если поток окна зависнет посреди показа, оба окна (сетка и сцена — во весь монитор, поверх всех)
+            // прячутся без него, а Alt+Tab отдаётся Windows
+            Guard = new StallGuard(Dispatcher) { Machine = machine, Busy = Busy, Recovered = Recover };
+            Guard.Watch(hwnd);
+            Guard.Watch(flip.Hwnd);
+            flip.Picked = delegate(int at) { if (!session.Open || at < 0 || at >= items.Count) return; session.Selected = at; Commit(); };
+            flip.CloseAsked = delegate(int at) { CloseCard(at); };
+            flip.Step = delegate(int d) { Handle(d > 0 ? KeyAction.Next : KeyAction.Prev, gen); };
+            flip.Cancelled = delegate { Cancel(); };
+            flip.Keyed = delegate(KeyAction a) { Handle(a, gen); };
+            flip.Failed = Abort;
+            // Устройства видеокарты заводятся заранее, если объёмный вид уже выбран: первый Alt+Tab их не ждёт
+            if (!demo && Prefs.Is3D(Prefs.View) && !Aside.On) WarmGpu();
+            Prefs.Changed += delegate { if (!demo && Prefs.Is3D(Prefs.View) && !Aside.On) WarmGpu(); };
+        }
+
+        // Порог показа прошёл: Alt ещё держат — показ, отпустили — просто переключение
+        void RevealDue()
+        {
+            revealTimer.Stop();
+            StopRevealWatch();
+            try
+            {
+                if (!session.Open || revealed) return;
+                if (!sticky && !Win.KeyDown(KeyMachine.Alt)) Commit(); else Reveal();
+            }
+            catch { Abort(); throw; }
+        }
+
+        // Объёмный вид: порог показа проверяется ещё и в каждом кадре. Пока сцена готовится, кадры идут без перерыва,
+        // и сообщение таймера Windows может опоздать на сотни мс (--flipprobe --real: 150 мс превращались в 490).
+        void RevealTick(object s, EventArgs e) { if (revealClock.Elapsed.TotalMilliseconds >= RevealMs) RevealDue(); }
+
+        void StopRevealWatch()
+        {
+            if (!revealWatch) return;
+            CompositionTarget.Rendering -= RevealTick;
+            revealWatch = false;
+        }
+
+        // Идёт ли показ — для сторожа (в потоке окна; не идёт — сторож засыпает). Заодно: KeyMachine считает, что
+        // переключатель открыт командой, а показа нет, — такое состояние глотало бы Tab, Enter, Esc и стрелки во всей
+        // системе (и Alt+Tab не работал бы совсем); оно заканчивается здесь.
+        bool Busy()
+        {
+            if (opening) return true;
+            bool shown = session.Open || revealed || awaiting || (flip != null && flip.Busy) || IsVisible;
+            if (!shown && machine != null && machine.Sticky) machine.End();
+            return shown || (machine != null && machine.Active);
+        }
+
+        // Поток окна висел дольше StallWatch.TripMs и очнулся. Сторож уже спрятал окна и пропускал клавиши мимо нас;
+        // здесь — всё в исходное состояние, чтобы следующий Alt+Tab работал как обычно. Действия перехватчика,
+        // скопившиеся в очереди за время зависания, устарели и не выполняются.
+        void Recover(double silentMs)
+        {
+            stale = machine != null ? machine.Generation : -1;
+            Abort();
+            flipping = false; awaiting = false; revealed = false;
+            if (machine != null) { machine.End(); machine.Resume(); }
+        }
+
+        // Есть ли захват на самом деле (с видеокартой); если не так, как думали, — страница настроек узнает
+        bool WarmGpu()
+        {
+            bool ok = Capture.Available;
+            if (ok) CaptureItems.Start();   // поток объектов захвата и фабрика — тоже заранее
+            if (AppHub.FlipAvailable != ok) { AppHub.FlipAvailable = ok; AppHub.Publish(); }
+            return ok;
         }
 
         // ───────── Действия: от клавиатуры (через KeyMachine), от мыши, от команды ─────────
@@ -187,6 +265,7 @@ namespace DevTxt.Smena
         // g — номер переключения, к которому действие относится (его дал KeyMachine)
         public void Handle(KeyAction a, int g)
         {
+            if (g <= stale) return;   // из очереди времён зависания: показ уже сброшен (Recover)
             try
             {
                 if (a == KeyAction.Open || a == KeyAction.OpenBack || a == KeyAction.OpenSame)
@@ -204,7 +283,7 @@ namespace DevTxt.Smena
                 else if (a == KeyAction.Commit) Commit();
                 else if (a == KeyAction.Cancel) Cancel();
                 else if (a == KeyAction.Close) { if (session.Open) { if (!revealed) Reveal(); CloseCard(session.Selected); } }
-                else if (session.Move(a))
+                else if (session.Move(flipping ? Flat(a) : a))
                 {
                     // Tab нажали ещё раз — человек выбирает, а не просто возвращается к прошлому окну: панель нужна сейчас
                     if (!revealed) Reveal(); else Select(true);
@@ -213,18 +292,27 @@ namespace DevTxt.Smena
             catch { Abort(); throw; }
         }
 
+        // В стопке один ряд: вверх и вниз — то же, что предыдущее и следующее окно
+        static KeyAction Flat(KeyAction a)
+        {
+            return a == KeyAction.Up ? KeyAction.Prev : a == KeyAction.Down ? KeyAction.Next : a;
+        }
+
         // Показ без клавиатуры: остаётся, пока не щёлкнут окно или не нажмут Esc. false — показывать нечего или уже показан.
         public bool OpenSticky()
         {
-            if (session.Open) return false;
+            if (session.Open || (Aside.On && !demo)) return false;   // в стороне (идёт игра) переключатель не показывается
+            // Номер показа берётся до показа: если показ закроется, ещё не успев открыться (окно сразу потеряло фокус),
+            // его «закончено» дойдёт до KeyMachine с тем же номером, и «открыто командой» не останется висеть
+            int g = !headless && machine != null ? machine.BeginSticky() : 0;
+            opening = true;
             try
             {
-                if (!OpenView(true, KeyAction.Open, 0)) return false;
-                if (headless) return true;
-                if (Machine != null) gen = Machine.BeginSticky();
+                if (!OpenView(true, KeyAction.Open, g)) { if (g != 0) machine.End(g); return false; }
                 return true;
             }
-            catch { Abort(); throw; }
+            catch { if (g != 0) machine.End(g); Abort(); throw; }
+            finally { opening = false; }
         }
 
         // Начало показа: окна перечислены, выбор сделан. Панель при Alt+Tab появляется чуть позже (Reveal), если Alt
@@ -232,11 +320,17 @@ namespace DevTxt.Smena
         bool OpenView(bool stay, KeyAction how, int g)
         {
             bool fgFirst = true;
+            if (Aside.On && !demo) return false;
+            // Прошлая стопка ещё доигрывает уход — обрываем его сразу, новый показ важнее
+            if (flip != null && flip.Busy) flip.Hide();
+            if (!demo && !headless) Marks.Begin(stay ? "sticky" : "alttab");
             items = demo ? Demo.Windows(DemoCount) : Win.List(Prefs.AllDesktops, true, out fgFirst);
+            Marks.Hit("list");
             if (how == KeyAction.OpenSame) items = Logic.SameApp(items, fgFirst && items.Count > 0 ? items[0].Key : null);
             LastCount = items.Count;
             if (items.Count == 0) return false;
             if (headless) return true;   // проверки без экрана: окна сосчитаны, показывать нечего
+            if (Guard != null) Guard.Arm();   // с этого мига поток окна сторожат
 
             sticky = stay;
             gen = g;
@@ -245,13 +339,24 @@ namespace DevTxt.Smena
             mon = Win.ActiveMonitor();
             viewW = (mon.Right - mon.Left) / scale; viewH = (mon.Bottom - mon.Top) / scale;
             Measure(viewW, viewH);
+            // Объёмный вид — если выбран, захват окон есть (в --demo окна выдуманные, захват не нужен) и среди окон нет видимой
+            // игры: в объёмный вид попал бы кадр монитора с её картинкой (Logic.UseFlip). Иначе молча сетка
+            flipping = flip != null && Logic.UseFlip(Prefs.Is3D(Prefs.View), items) && (demo || WarmGpu());
+            if (flipping) cols = items.Count;
             session.Begin(items.Count, cols, fgFirst, how == KeyAction.OpenBack);
+            if (flipping && !demo) { flip.Warm(mon, items, session.Selected); Marks.Hit("warm"); }   // кадр экрана и обои начинают захватываться сразу, ещё до показа
             if (sticky) Reveal();
             else
             {
-                Win.SendMask();   // чтобы программа под нами не открыла меню, когда Alt отпустят
+                // Чтобы программа под нами не открыла меню, когда Alt отпустят. Игре своих нажатий не посылаем
+                if (demo || !Win.GameAhead()) Win.SendMask();
                 altWatch.Start();
                 revealTimer.Start();
+                if (flipping)
+                {
+                    revealClock.Restart();
+                    if (!revealWatch) { CompositionTarget.Rendering += RevealTick; revealWatch = true; }
+                }
             }
             return true;
         }
@@ -261,12 +366,17 @@ namespace DevTxt.Smena
         void Reveal()
         {
             revealTimer.Stop();
+            StopRevealWatch();
             if (revealed || !session.Open) return;
             revealed = true;
+            Marks.Hit("reveal");
+            if (flipping) { flip.Open(items, session.Selected, mon, sticky, demo); return; }
             Build();
             foreach (Card c in cards)
             {
                 if (c.Item.Minimized || c.Item.Fake) continue;
+                // Окну игры миниатюры DWM не заводим: плашка со значком, как у окна без картинки
+                if (!Logic.MayTouch(c.Item)) { NoPreview(c); continue; }
                 c.Thumb = Win.ThumbRegister(hwnd, c.Item.Hwnd);
                 if (c.Thumb != IntPtr.Zero && !Win.ThumbSource(c.Thumb, c.Item.Hwnd, out c.Source)) { Win.ThumbRelease(c.Thumb); c.Thumb = IntPtr.Zero; }
                 if (c.Thumb == IntPtr.Zero) NoPreview(c);
@@ -301,7 +411,7 @@ namespace DevTxt.Smena
             uncloakGuard.Stop();
             if (!awaiting) return;
             awaiting = false;
-            Win.Cloak(hwnd, false);
+            if (!StallGuard.Tripped) Win.Cloak(hwnd, false);   // сторож только что спрятал окно: сброс показа уже в очереди
             if (!snap)
             {
                 panelHost.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(Tokens.Motion.FastMs)) { EasingFunction = Ui.EaseOut });
@@ -318,7 +428,7 @@ namespace DevTxt.Smena
             if (chosen < 0) return;
             WinItem target = chosen < items.Count ? items[chosen] : null;
             if (!demo && !headless && target != null) Win.Activate(target.Hwnd);
-            CloseView();
+            CloseView(target, true);
         }
 
         void Cancel()
@@ -326,21 +436,34 @@ namespace DevTxt.Smena
             bool was = session.Open;
             session.Close();
             if (Machine != null) Machine.End(gen);
-            if (was) CloseView();
+            if (was) CloseView(null, true);
         }
 
         // Что-то пошло не так — на экране ничего не оставляем ни при каких условиях
         public void Abort()
         {
-            try { session.Close(); if (Machine != null) Machine.End(gen); CloseView(); } catch { }
+            try { session.Close(); if (Machine != null) Machine.End(gen); CloseView(null, false); } catch { }
+            try { if (flip != null) flip.Hide(); } catch { }
         }
 
-        void CloseView()
+        // target — окно, в которое переключились (null — отмена); animate — стопке можно доиграть уход
+        void CloseView(WinItem target, bool animate)
         {
             altWatch.Stop();
             revealTimer.Stop();
+            StopRevealWatch();
             uncloakGuard.Stop();
             StopTicking();
+            if (flipping)
+            {
+                // Логика закрыта сразу (session, Machine.End — как в сетке); сцена доигрывает уход и потом зовёт Finished
+                flipping = false;
+                awaiting = false;
+                revealed = false;
+                if (animate) flip.Close(target, Done);
+                else { flip.Hide(); Done(); }
+                return;
+            }
             // Сначала прячем окно от глаз — панель и превью исчезают разом; спрятанным оно и остаётся до следующего показа
             if (hwnd != IntPtr.Zero && (revealed || IsVisible)) Win.Cloak(hwnd, true);
             awaiting = false;
@@ -350,8 +473,10 @@ namespace DevTxt.Smena
             cards.Clear();
             deck.Children.Clear();
             strip.Children.Clear();
-            if (Finished != null) Finished();
+            Done();
         }
+
+        void Done() { if (Finished != null) Finished(); }
 
         // Закрывает окно с карточки (Delete или щелчок колёсиком) и убирает карточку; показ продолжается
         void CloseCard(int at)
@@ -361,14 +486,16 @@ namespace DevTxt.Smena
             if (!w.Fake && !demo && !headless) Win.Close(w.Hwnd);
             items.RemoveAt(at);
             if (items.Count > 0) Measure(viewW, viewH);
+            if (flipping) cols = Math.Max(1, items.Count);
             if (!session.Remove(at, cols))
             {
                 // Окон не осталось
                 if (Machine != null) Machine.End(gen);
-                CloseView();
+                CloseView(null, true);
                 return;
             }
             if (!revealed) return;
+            if (flipping) { flip.Remove(at); flip.Select(session.Selected, true); return; }
             // Карточки строятся заново, а живые превью оставшихся окон остаются теми же — они не мигают
             var old = new List<Card>(cards);
             Build();
@@ -401,7 +528,7 @@ namespace DevTxt.Smena
             firstRow = Math.Max(0, Math.Min(firstRow, rows - visibleRows));
 
             double vw = cols * cardW + (cols - 1) * Layout.Gap + 2 * Layout.Margin, vh = visibleRows * cardH + (visibleRows - 1) * Layout.Gap + 2 * Layout.Margin;
-            hint.Text = sticky ? "Щёлкните окно или нажмите Enter  ·  Delete — закрыть окно  ·  Esc — отмена" : "";
+            hint.Text = sticky ? StickyHint : "";
             // Узкая панель: подсказке про клавиши нужно место
             double minW = sticky ? 2 * (Layout.Margin + 2) + hint.FontSize * 0.55 * hint.Text.Length : 0;
             panelW = Math.Max(vw, minW) + 2 * PanelPad; panelH = PanelPad + vh + footer + bottom;
@@ -531,6 +658,7 @@ namespace DevTxt.Smena
         void Select(bool animate)
         {
             int sel = session.Selected;
+            if (flipping) { if (revealed) flip.Select(sel, animate); return; }
             for (int i = 0; i < cards.Count; i++)
             {
                 bool on = i == sel;
@@ -683,8 +811,8 @@ namespace DevTxt.Smena
             string thumb = "нет окон";
             if (current.Count > 0)
             {
-                WinItem w = current.Find(delegate(WinItem x) { return !x.Minimized; }) ?? current[0];
-                IntPtr t = Win.ThumbRegister(hwnd, w.Hwnd);
+                WinItem w = current.Find(delegate(WinItem x) { return !x.Minimized && !x.Game; }) ?? current.Find(delegate(WinItem x) { return !x.Game; });
+                IntPtr t = w == null ? IntPtr.Zero : Win.ThumbRegister(hwnd, w.Hwnd);
                 Win.RECT part;
                 bool sized = t != IntPtr.Zero && Win.ThumbSource(t, w.Hwnd, out part);
                 bool updated = sized && Win.ThumbUpdate(t, new Win.RECT { Right = 100, Bottom = 62 }, new Win.RECT { Right = 100, Bottom = 62 }, 255, true);

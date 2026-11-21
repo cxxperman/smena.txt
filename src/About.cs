@@ -42,6 +42,7 @@ namespace DevTxt.Smena
 
             Prefs.Changed += Render;
             AppHub.StatusChanged += Render;
+            Aside.Changed += Render;
             // Окно не закрывается, а прячется: приложение живёт в трее
             Closing += delegate(object s, System.ComponentModel.CancelEventArgs e) { if (!Program.Quitting) { e.Cancel = true; Hide(); } };
 
@@ -100,12 +101,14 @@ namespace DevTxt.Smena
         // Приводит строки состояния в соответствие с тем, что есть
         void Render()
         {
+            bool aside = !demo && Aside.On;
             if (demo || Hook.Installed) hook.Set("Alt+Tab открывает " + Program.Id + ".txt", Status.Kind.Ok);
             else if (Prefs.Paused) hook.Set("Приостановлено — работает обычный Alt+Tab", Status.Kind.Warn);
+            else if (aside) hook.Set(Aside.Text + " — smena.txt в стороне, работает обычный Alt+Tab", Status.Kind.Warn);
             else if (!Prefs.Replace) hook.Set("Замена Alt+Tab выключена в настройках", Status.Kind.None);
             else if (!Hook.Allowed) hook.Set("Запущено без перехвата клавиш", Status.Kind.None);
             else hook.Set("Не удалось перехватить Alt+Tab", Status.Kind.Bad);
-            tryBtn.Set("Показать", null, true, delegate { if (Try != null) Try(); });
+            tryBtn.Set("Показать", null, !aside, delegate { if (Try != null) Try(); });   // в стороне переключатель не показывается
 
             bool online = demo || AppHub.Online;
             if (online) hub.Set("Настройки — в core.txt", Status.Kind.Ok);

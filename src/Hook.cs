@@ -2,7 +2,8 @@
 // Перехватчик живёт в собственном потоке и на каждую клавишу делает самое малое: спрашивает KeyMachine,
 // что она значит, отдаёт действие потоку окна (BeginInvoke, без ожидания) и возвращается. Ни окон, ни диска, ни
 // ожиданий здесь нет: медленный перехватчик тормозит клавиатуру во всей системе, и Windows молча его снимает.
-// Пока переключатель приостановлен или выключен в настройках, перехватчика нет вовсе.
+// Пока переключатель приостановлен, выключен в настройках или отошёл в сторону на время игры (Aside.cs), перехватчика
+// нет вовсе.
 using System;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -38,8 +39,12 @@ namespace DevTxt.Smena
         static Action<KeyAction, int> act;   // действие и номер переключения, к которому оно относится
 
         public static bool Allowed;   // false — перехватчик не ставится никогда (--no-hook, --headless, --demo, проверки)
-        public static bool Installed { get { return handle != IntPtr.Zero; } }
+        // Только --asideprobe: вместо перехватчика — заглушка с тем же порядком установки и снятия, клавиатура не трогается
+        public static bool Stub;
+        static bool stubbed;
+        public static bool Installed { get { return Stub ? stubbed : handle != IntPtr.Zero; } }
         public static int Refreshes;   // сколько раз перехватчик ставился заново без перерыва (для журнала и проверок)
+        public static Action Posting;  // зовётся в потоке перехватчика перед каждым действием для окна (StallGuard.Arm): быстро, без ожиданий
 
         public static void Setup(KeyMachine m, Dispatcher dispatcher, Action<KeyAction, int> handler)
         {
@@ -66,7 +71,9 @@ namespace DevTxt.Smena
         {
             lock (gate)
             {
+                if (Stub) { if (!stubbed) { stubbed = true; Calls.Add(ref Calls.HookOn); } return; }
                 if (thread != null) return;
+                Calls.Add(ref Calls.HookOn);
                 var ready = new ManualResetEvent(false);
                 // Код перехватчика компилируется заранее: первая клавиша не ждёт компилятора, а Windows не успевает решить,
                 // что перехватчик завис, и снять его
@@ -121,10 +128,15 @@ namespace DevTxt.Smena
         {
             lock (gate)
             {
-                if (thread == null) return;
-                if (handle != IntPtr.Zero) PostThreadMessage(threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
-                thread.Join(1000);
-                thread = null;
+                if (Stub) { if (stubbed) { stubbed = false; Calls.Add(ref Calls.HookOff); } }
+                else
+                {
+                    if (thread == null) return;
+                    Calls.Add(ref Calls.HookOff);
+                    if (handle != IntPtr.Zero) PostThreadMessage(threadId, WM_QUIT, IntPtr.Zero, IntPtr.Zero);
+                    thread.Join(1000);
+                    thread = null;
+                }
             }
             if (machine != null) machine.End();
         }
@@ -149,7 +161,13 @@ namespace DevTxt.Smena
                         KeyAction action;
                         int gen;
                         bool eat = machine.Key(vk, scan, down, (flags & LLKHF_ALTDOWN) != 0, shift, other, out action, out gen);
-                        if (action != KeyAction.None) ui.BeginInvoke(DispatcherPriority.Send, act, action, gen);
+                        if (action != KeyAction.None)
+                        {
+                            // Сначала — сторожу: теперь поток окна должен ответить (если он завис, клавиши пойдут мимо нас)
+                            Action p = Posting;
+                            if (p != null) p();
+                            ui.BeginInvoke(DispatcherPriority.Send, act, action, gen);
+                        }
                         if (eat) return new IntPtr(1);
                     }
                 }

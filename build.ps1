@@ -28,7 +28,13 @@ try {
         "$fw\System.Core.dll",
         "$fw\System.Web.Extensions.dll",
         "$fw\System.Windows.Forms.dll",
-        "$fw\System.Drawing.dll"
+        "$fw\System.Drawing.dll",
+        # Windows.Graphics.Capture (живая картинка окна, Capture.cs): системные описания WinRT и фасады .NET к ним
+        "$env:WINDIR\System32\WinMetadata\Windows.Foundation.winmd",
+        "$env:WINDIR\System32\WinMetadata\Windows.Graphics.winmd",
+        "$fw\System.Runtime.dll",
+        "$fw\System.Runtime.WindowsRuntime.dll",
+        "$fw\System.Runtime.InteropServices.WindowsRuntime.dll"
     )
     $a = @('/nologo', '/target:winexe', '/platform:x64', '/optimize+', '/utf8output', '/codepage:65001', "/out:$tmp\$name.exe")
     $a += $refs | ForEach-Object { "/r:$_" }

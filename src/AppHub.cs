@@ -4,7 +4,8 @@
 // один раз показывает переключатель, чтобы его можно было попробовать без клавиатуры; со страницей — окно (ShowRoute).
 // Семья dev.txt (Family.cs): пока core.txt на связи и держит один значок в трее на всех, своего значка нет —
 // «Открыть» и «Приостановить» smena.txt стоят в его меню (smena.tray), а оба сочетания клавиш — на его странице
-// «Клавиши» (smena.keys). «Не вмешиваться в играх» core.txt показывает на своей странице «Игры».
+// «Клавиши» (smena.keys). «Не вмешиваться в играх» core.txt показывает на своей странице «Игры». Пока smena.txt
+// в стороне (идёт игра, Aside.cs), оба сочетания в smena.keys выключены, а «show» отвечает отказом с причиной.
 // core.txt может быть не запущен — это нормально: приложение работает само и тихо пробует подключиться снова.
 // Протокол описан в kit.txt (hub/PROTOCOL.md); HubLink.cs и Family.cs скопированы оттуда как есть.
 using System;
@@ -24,6 +25,7 @@ namespace DevTxt.Smena
         static Dispatcher ui;
         static int published;
 
+        public static bool FlipAvailable = true;    // есть ли на этом компьютере объёмные виды (Windows.Graphics.Capture); ставит Program
         public static Func<bool> Show;              // показать переключатель: команда «show» без страницы; true — показан
         public static Action Quit;                  // закрыть smena.txt: «Закрыть» в трее core.txt, пока своего значка нет
         public static Action Open;                  // открыть окно «О программе»: «Открыть» в трее core.txt, «show» со страницей
@@ -43,6 +45,9 @@ namespace DevTxt.Smena
             get { int p; return int.TryParse(Environment.GetEnvironmentVariable("SMENA_HUB_PORT"), out p) && p > 0 ? p : 0; }
         }
 
+        // Подсказка к «Не вмешиваться в играх»: что именно делает программа (Aside.cs и окна игр в Win.cs)
+        public const string GamesHint = "Когда идёт игра с античитом или впереди окно на весь экран, smena.txt полностью отходит в сторону — работает обычный Alt+Tab";
+
         // Описание настроек — в том виде, в каком его ждёт core.txt: всегда целиком.
         // «Не вмешиваться в играх» помечена section: "games" — core.txt показывает её на своей странице «Игры»,
         // рядом с тем, что делают в играх остальные приложения. Ключ и значение те же.
@@ -52,12 +57,17 @@ namespace DevTxt.Smena
             {
                 HubLink.Msg("key", "replace", "type", "switch", "label", "Заменять Alt+Tab", "hint", "Вместо системного переключателя окон открывается этот", "value", Prefs.Replace),
                 HubLink.Msg("key", "sameApp", "type", "switch", "label", "Alt+` — окна того же приложения", "hint", "Клавиша над Tab перебирает окна программы, в которой вы сейчас", "value", Prefs.SameApp),
-                HubLink.Msg("key", "games", "type", "switch", "label", "Не вмешиваться в играх", "hint", "Когда впереди игра или другое окно на весь экран, работает обычный Alt+Tab", "value", Prefs.Games, "section", "games")
+                HubLink.Msg("key", "games", "type", "switch", "label", "Не вмешиваться в играх", "hint", GamesHint, "value", Prefs.Games, "section", "games")
             };
+            var options = new object[Prefs.Views.Length];
+            for (int i = 0; i < options.Length; i++) options[i] = HubLink.Msg("value", Prefs.Views[i], "label", Prefs.ViewLabels[i]);
             var view = new object[]
             {
+                HubLink.Msg("key", "view", "type", "choice", "label", "Вид переключателя",
+                    "hint", FlipAvailable ? "Все виды, кроме сетки, — объёмные, с живыми окнами" : "Объёмные виды на этом компьютере недоступны — будет сетка",
+                    "value", Prefs.View, "options", options),
                 HubLink.Msg("key", "allDesktops", "type", "switch", "label", "Показывать окна со всех рабочих столов", "hint", "Иначе — только с текущего", "value", Prefs.AllDesktops),
-                HubLink.Msg("key", "size", "type", "slider", "label", "Размер превью", "value", Prefs.Size, "min", Layout.MinPreview, "max", Layout.MaxPreview, "step", Layout.StepPreview, "unit", "px")
+                HubLink.Msg("key", "size", "type", "slider", "label", "Размер превью", "hint", "Только для сетки; к объёмным видам не относится", "value", Prefs.Size, "min", Layout.MinPreview, "max", Layout.MaxPreview, "step", Layout.StepPreview, "unit", "px")
             };
             return HubLink.Msg("groups", new object[] { HubLink.Msg("title", "Клавиши", "items", keys), HubLink.Msg("title", "Вид", "items", view) });
         }
@@ -73,11 +83,11 @@ namespace DevTxt.Smena
             };
         }
 
-        // Сочетания для общей страницы «Клавиши» в core.txt. Работают, пока замена Alt+Tab включена и не приостановлена;
-        // сочетание с клавишей над Tab — ещё и пока включены окна того же приложения.
+        // Сочетания для общей страницы «Клавиши» в core.txt. Работают, пока замена Alt+Tab включена, не приостановлена и
+        // smena.txt не в стороне (идёт игра); сочетание с клавишей над Tab — ещё и пока включены окна того же приложения.
         public static List<KeyInfo> Keys()
         {
-            bool on = Prefs.Replace && !Prefs.Paused;
+            bool on = Logic.KeysOn(Prefs.Replace, Prefs.Paused, Aside.On);
             return new List<KeyInfo>
             {
                 new KeyInfo("switch", "Переключение окон", KeyNames.Text(AltMod, KeyMachine.Tab), on),
@@ -85,13 +95,21 @@ namespace DevTxt.Smena
             };
         }
 
+        // Столько поток хаба ждёт поток окна. Взаимного ожидания нет (поток окна в хаб только кладёт сообщения в очередь),
+        // но если поток окна завис, поток хаба без предела стоял бы вместе с ним — и связь с core.txt тоже.
+        const int UiWaitMs = 5000;
+
         // Выполнить в потоке окна и дождаться: ответ на команду уходит, когда всё уже сделано и разослано.
-        // Без окна (проверки) — прямо здесь.
+        // Поток окна не ответил за UiWaitMs — просьба снимается, в ответ уходит «не получилось». Без окна (проверки) — прямо здесь.
         static void OnUi(Action a)
         {
             if (ui == null || ui.CheckAccess()) { a(); return; }
             Exception failed = null;
-            ui.Invoke(new Action(delegate { try { a(); } catch (Exception e) { failed = e; } }));
+            DispatcherOperation op = ui.BeginInvoke(DispatcherPriority.Send, new Action(delegate { try { a(); } catch (Exception e) { failed = e; } }));
+            // Не успел: снимаем просьбу; если она уже выполняется — даём доделать ещё столько же
+            if (op.Wait(TimeSpan.FromMilliseconds(UiWaitMs)) != DispatcherOperationStatus.Completed
+                && (op.Abort() || op.Wait(TimeSpan.FromMilliseconds(UiWaitMs)) != DispatcherOperationStatus.Completed))
+                throw new Exception("smena.txt сейчас не отвечает, попробуйте ещё раз");
             if (failed != null) throw failed;
         }
 
@@ -115,6 +133,13 @@ namespace DevTxt.Smena
                 double n;
                 if (!Number(value, out n)) throw new Exception("нужно число");
                 Prefs.Set(key, Prefs.Snap(n));
+                return;
+            }
+            if (key == "view")
+            {
+                string v = value as string;
+                if (v == null || Prefs.KnownView(v) != v) throw new Exception("нужно одно из: " + string.Join(", ", Prefs.Views));
+                Prefs.Set(key, v);
                 return;
             }
             if (key == "replace" || key == "sameApp" || key == "games" || key == "allDesktops")
@@ -150,7 +175,11 @@ namespace DevTxt.Smena
             link.OnStatus = delegate(bool on) { ui.BeginInvoke(new Action(delegate { if (StatusChanged != null) StatusChanged(); })); };
             // Семья: core.family, hub.apps и tray.run. Встаёт поверх своих обработчиков — и до link.Start()
             family = new Family(link, Program.Id, delegate { ui.BeginInvoke(new Action(delegate { if (Quit != null) Quit(); })); });
-            family.Changed = delegate { ui.BeginInvoke(new Action(delegate { if (FamilyChanged != null) FamilyChanged(); })); };
+            family.Changed = delegate
+            {
+                Aside.Recheck();   // core.family.game мог поменяться — не ждём опроса
+                ui.BeginInvoke(new Action(delegate { if (FamilyChanged != null) FamilyChanged(); }));
+            };
             Prefs.Changed += Publish;   // настройку поменяли — страница в core.txt тоже обновится
             link.Start();
             Publish();                  // хаба ещё нет — клиент запомнит и повторит после подключения
@@ -193,29 +222,28 @@ namespace DevTxt.Smena
                 if (can) Open();
                 return HubLink.Msg("shown", can, "opened", "about");
             }
+            // В стороне переключатель не показывается: идёт игра (reason — почему, для подписи)
+            if (Aside.On) return HubLink.Msg("shown", false, "opened", "switcher", "reason", Aside.Text + " — smena.txt в стороне, работает обычный Alt+Tab");
             return HubLink.Msg("shown", Show != null && Show(), "opened", "switcher");
         }
+
+        // core.txt сказал, что идёт игра (core.family.game); из любого потока
+        public static bool CoreGame { get { return family != null && family.Game; } }
 
         // Приходит в фоновом потоке
         static object Command(string name, Dictionary<string, object> args, string from)
         {
-            Exception failed = null;
             object result = null;
-            ui.Invoke(new Action(delegate
+            OnUi(delegate
             {
-                try
-                {
-                    if (name == "show") { result = ShowCommand(args); return; }
-                    object key, value;
-                    args.TryGetValue("key", out key);
-                    args.TryGetValue("value", out value);
-                    int before = published;
-                    try { Apply(key as string, value); }
-                    finally { if (published == before) Publish(); }   // core.txt ждёт полную картину, даже если ничего не изменилось
-                }
-                catch (Exception e) { failed = e; }
-            }));
-            if (failed != null) throw failed;
+                if (name == "show") { result = ShowCommand(args); return; }
+                object key, value;
+                args.TryGetValue("key", out key);
+                args.TryGetValue("value", out value);
+                int before = published;
+                try { Apply(key as string, value); }
+                finally { if (published == before) Publish(); }   // core.txt ждёт полную картину, даже если ничего не изменилось
+            });
             return result;
         }
     }

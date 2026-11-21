@@ -333,12 +333,31 @@ namespace DevTxt
             catch { return false; }
         }
 
-        // Имя процесса: окно впереди меняется редко, поэтому последнее запоминается
+        // Имя процесса без .exe — из снимка списка процессов. Сам процесс не открывается (ни OpenProcess, ни хэндла к нему):
+        // окно на весь экран может быть игрой под античитом. Окно впереди меняется редко, поэтому последнее запоминается
         static string Name(int pid)
         {
             if (pid == lastPid) return lastName;
             string name = "";
-            try { using (var p = Process.GetProcessById(pid)) name = p.ProcessName; } catch { }
+            try
+            {
+                IntPtr snap = CreateToolhelp32Snapshot(2, 0);   // TH32CS_SNAPPROCESS
+                if (snap != new IntPtr(-1))
+                {
+                    try
+                    {
+                        var e = new PROCESSENTRY32 { Size = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32)) };
+                        if (Process32First(snap, ref e))
+                            do
+                            {
+                                if (e.Pid == (uint)pid) { name = e.ExeFile ?? ""; break; }
+                            } while (Process32Next(snap, ref e));
+                    }
+                    finally { CloseHandle(snap); }
+                }
+            }
+            catch { }
+            if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 4);
             lastPid = pid; lastName = name;
             return name;
         }
@@ -356,6 +375,12 @@ namespace DevTxt
         [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
         [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr mon, ref MONITORINFO info);
         [DllImport("dwmapi.dll")] static extern int DwmGetWindowAttribute(IntPtr h, int attr, out int value, int size);
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        struct PROCESSENTRY32 { public uint Size, Usage, Pid; public IntPtr DefaultHeapId; public uint ModuleId, Threads, ParentPid; public int PriClassBase; public uint Flags; [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string ExeFile; }
+        [DllImport("kernel32.dll")] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+        [DllImport("kernel32.dll", EntryPoint = "Process32FirstW", CharSet = CharSet.Unicode)] static extern bool Process32First(IntPtr snap, ref PROCESSENTRY32 e);
+        [DllImport("kernel32.dll", EntryPoint = "Process32NextW", CharSet = CharSet.Unicode)] static extern bool Process32Next(IntPtr snap, ref PROCESSENTRY32 e);
+        [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
     }
 
     // Связь приложения с семьёй: слушает core.family и hub.apps, отвечает на tray.run, отдаёт <app>.tray и <app>.keys

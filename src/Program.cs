@@ -11,7 +11,35 @@
 //   --no-hook           работать как обычно, но перехватчик клавиш не ставить; переключатель открывается только командой «show»
 //                       без страницы и кнопкой «Показать»
 //   --probe [файл]      сосчитать настоящие окна, попробовать завести живое превью на спрятанном окне, написать одну строку и выйти
-// Для проверок же: SMENA_HUB_PORT — хаб на другом порту, SMENA_DATA — другая папка для настроек.
+//   --capture [файл.png] проверить живую картинку окна (Windows.Graphics.Capture → WPF) на своём окне, спрятанном DWM:
+//                       одна строка итога в вывод, код выхода 0 — картинка пришла и цвета совпали; в файл — полученный кадр.
+//                       --copy — сразу запасной путь через память вместо D3DImage
+//   --view ВИД          вид для --demo, --shot и --flipprobe (на настройки не влияет): grid — сетка; flip, cascade, cover,
+//                       carousel, fan, panorama, helix, rolodex, tunnel — объёмные раскладки. --demo --view flip —
+//                       сцена с выдуманными окнами без захвата; --shot файл.png --view flip — её конечный вид в файл
+//   --demo --view ВИД --film ПАПКА  раскадровка объёмной сцены без экрана: появление и уход выбранного окна по кадрам
+//                       (open_000.png…, leave_000.png…) и контактные листы open.png и leave.png; --fps N — шаг (по умолчанию 60),
+//                       --size ШxВ — размер «экрана» (по умолчанию 1720x720). Одна строка итога: смещения за кадр, разница
+//                       первого и последнего кадров с «рабочим столом». --pick-min — выбрано свёрнутое окно: его карточка
+//                       летит на место, где окно встанет после разворачивания; --pick-min miss — место предсказано мимо,
+//                       и карточка доводится до настоящего
+//   --flipprobe [файл.png] проверить объёмную сцену живьём без экрана (раскладка — --view, по умолчанию «Стопка»): свои
+//                       спрятанные цветные окна, спрятанная сцена на них, 3 секунды листания; одна строка замеров в вывод,
+//                       код выхода 0 — сцена отработала без ошибок и все свои окна дали кадры. В файл — сцена в середине
+//                       прогона, на общем фоне dev.txt вместо экрана
+//   --flipprobe --real  та же спрятанная сцена на настоящих окнах (список — как при Alt+Tab), три показа подряд; окна только
+//                       захватываются, ничего не выводится вперёд. Одна строка: время от нажатия до первого кадра, доля полёта на нём,
+//                       кадры полёта и ухода, худший промежуток между кадрами
+//   --flipprobe --stall МС  проверить сторожа потока окна (Stall.cs): два своих окна 1×1 в углу экрана, их поток замирает
+//                       на МС (не меньше 2000); сторож должен сам спрятать окна и отдать Alt+Tab Windows, а очнувшийся
+//                       поток — сбросить показ. Больше 10500 — проверяется и выход программы (в пробе он подменён)
+//   --asideprobe        проверить «отойти в сторону» на время игры (Aside.cs) без экрана и без настоящего перехвата клавиатуры:
+//                       перехватчик — заглушка, список процессов подменён. Одна строка итога, код выхода 0 — всё так
+// Обычный запуск (без ключей проверки) из временной папки запрещён — это пробная сборка; SMENA_ALLOW_TEMP=1 — разрешить.
+// Для проверок же: SMENA_HUB_PORT — хаб на другом порту, SMENA_DATA — другая папка для настроек,
+// SMENA_TRACE=<файл> — каждый настоящий показ объёмного вида дописывает туда строку отметок времени (Marks.cs),
+// SMENA_FAKE_PROCS — только с --headless: какие процессы «запущены» (имена через запятую или путь к файлу с ними;
+// файл читается при каждом опросе) вместо настоящего списка — так «идёт игра» проверяется без игры.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -42,6 +70,9 @@ namespace DevTxt.Smena
 
         public static bool Quitting;
 
+        // Нужен ли сейчас перехватчик клавиш: замена Alt+Tab включена, не приостановлена и smena.txt не в стороне
+        public static bool HookWanted { get { return Prefs.Replace && !Prefs.Paused && !Aside.On; } }
+
         public static string VersionText
         {
             get { Version v = typeof(Program).Assembly.GetName().Version; return v.Major + "." + v.Minor + "." + v.Build; }
@@ -55,6 +86,21 @@ namespace DevTxt.Smena
 
         static bool Has(string[] args, string name) { return Array.IndexOf(args, name) >= 0; }
 
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint size);
+
+        // Полный путь без коротких имён 8.3 (временная папка бывает вида C:\Users\ABCDEF~1\...); не вышло — как есть
+        static string LongPath(string path)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder(1024);
+                uint n = GetLongPathName(Path.GetFullPath(path), sb, (uint)sb.Capacity);
+                return n > 0 && n < sb.Capacity ? sb.ToString() : Path.GetFullPath(path);
+            }
+            catch { return path; }
+        }
+
         [STAThread]
         static int Main(string[] args)
         {
@@ -64,6 +110,49 @@ namespace DevTxt.Smena
             bool demo = Has(args, "--demo"), headless = Has(args, "--headless"), probe = Has(args, "--probe");
             string shot = Arg(args, "--shot");
             if (Has(args, "--selftest")) return SelfTest.Run();
+            if (Has(args, "--capture"))
+            {
+                // Без мьютекса, настроек и сети: своё невидимое окно, итог — одной строкой
+                Prefs.Persist = false;
+                new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+                LiveWindow.ForceCopy = Has(args, "--copy");
+                string line;
+                int code = CaptureProbe.Run(Arg(args, "--capture"), out line);
+                try { var o = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)); o.WriteLine(line); o.Flush(); } catch { }
+                return code;
+            }
+            if (Has(args, "--asideprobe"))
+            {
+                // Без мьютекса, настроек, хаба и экрана; перехватчик — заглушка
+                string line;
+                int code = AsideProbe.Run(out line);
+                try { var o = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)); o.WriteLine(line); o.Flush(); } catch { }
+                return code;
+            }
+            if (Has(args, "--flipprobe"))
+            {
+                // Так же: без мьютекса, настроек и сети; все окна спрятаны
+                Prefs.Persist = false;
+                string probeView = Arg(args, "--view");
+                if (probeView != null && Prefs.Is3D(probeView)) Prefs.View = probeView;
+                new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+                string line;
+                int stall, count;
+                if (!int.TryParse(Arg(args, "--count") ?? "", out count) || count < 1 || count > 60) count = 0;
+                int code = Has(args, "--stall") ? (int.TryParse(Arg(args, "--stall") ?? "3000", out stall) ? StallProbe.Run(stall, out line) : StallProbe.Run(0, out line))
+                    : Has(args, "--real") ? FlipProbe.RunReal(4, out line) : FlipProbe.Run(Arg(args, "--flipprobe"), count, out line);
+                try { var o = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)); o.WriteLine(line); o.Flush(); } catch { }
+                return code;
+            }
+
+            // Обычный запуск (без ключей проверки) пробной сборки из временной папки не встаёт настоящим перехватом
+            // клавиатуры: такую копию мог подхватить и запустить core.txt, а в ней может быть недоделанное.
+            // Нарочно — переменная SMENA_ALLOW_TEMP=1.
+            if (shot == null && !demo && !probe && !headless && Logic.RefuseTempRun(Logic.InFolder(LongPath(typeof(Program).Assembly.Location), LongPath(Path.GetTempPath())), Environment.GetEnvironmentVariable("SMENA_ALLOW_TEMP")))
+            {
+                try { var o = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)); o.WriteLine("пробная сборка: запуск без ключей из временной папки запрещён"); o.Flush(); } catch { }
+                return 3;
+            }
 
             bool created = true;
             Mutex mutex = null;
@@ -77,6 +166,10 @@ namespace DevTxt.Smena
 
             var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
             if (demo || shot != null || probe) Prefs.Persist = false; else Prefs.Load();
+            string view = Arg(args, "--view");
+            if (view != null && (demo || shot != null)) Prefs.View = Prefs.KnownView(view);
+            // Есть ли объёмные виды — для страницы настроек; видеокарта тут не трогается (это делает первый показ сцены)
+            AppHub.FlipAvailable = Capture.SystemSupports;
             int n;
             if (int.TryParse(Arg(args, "--count"), out n) && n > 0 && n <= 60) Switcher.DemoCount = n;
 
@@ -88,8 +181,30 @@ namespace DevTxt.Smena
                 if (size.Length == 2) { double.TryParse(size[0], out w); double.TryParse(size[1], out h); }
                 int select = -1;
                 int.TryParse(Arg(args, "--select") ?? "-1", out select);
-                new Switcher(true, false).Shot(shot, Math.Max(640, w), Math.Max(400, h), select, Has(args, "--sticky"));
+                if (Prefs.Is3D(Prefs.View)) new FlipView().Shot(shot, Math.Max(640, w), Math.Max(400, h), select, Has(args, "--sticky"));
+                else new Switcher(true, false).Shot(shot, Math.Max(640, w), Math.Max(400, h), select, Has(args, "--sticky"));
                 return 0;
+            }
+
+            string film = Arg(args, "--film");
+            if (film != null && demo)
+            {
+                // Раскадровка объёмной сцены в файлы; окон на экране нет
+                string line;
+                int code = 0;
+                if (!Prefs.Is3D(Prefs.View)) { line = "film: нужен объёмный вид (--view flip, cover…)"; code = 1; }
+                else
+                {
+                    double w = 1720, h = 720, fps = 60;
+                    string[] size = (Arg(args, "--size") ?? "").Split('x');
+                    if (size.Length == 2) { double.TryParse(size[0], out w); double.TryParse(size[1], out h); }
+                    double f;
+                    if (double.TryParse(Arg(args, "--fps") ?? "", System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out f) && f >= 10 && f <= 480) fps = f;
+                    int pickMin = !Has(args, "--pick-min") ? 0 : Arg(args, "--pick-min") == "miss" ? 2 : 1;
+                    line = new FlipView().Film(film, Math.Max(640, w), Math.Max(400, h), fps, pickMin);
+                }
+                try { var o = new StreamWriter(Console.OpenStandardOutput(), new System.Text.UTF8Encoding(false)); o.WriteLine(line); o.Flush(); } catch { }
+                return code;
             }
 
             var switcher = new Switcher(demo, headless);
@@ -120,21 +235,30 @@ namespace DevTxt.Smena
             }
 
             var machine = new KeyMachine();
-            machine.LeaveAlone = delegate { return Logic.LeaveAlone(Prefs.Paused, Prefs.Replace, Prefs.Games, Prefs.Games && Win.FullscreenAhead()); };
+            machine.LeaveAlone = delegate { return Aside.On || Logic.LeaveAlone(Prefs.Paused, Prefs.Replace, Prefs.Games, Prefs.Games && Win.FullscreenAhead()); };
             machine.SameApp = delegate { return Prefs.SameApp; };
             switcher.Machine = machine;
 
             // Перехватчик клавиш: только в обычном запуске и только пока он нужен
             Hook.Allowed = !headless && !Has(args, "--no-hook");
             Hook.Setup(machine, app.Dispatcher, switcher.Handle);
-            Action sync = delegate { Hook.Sync(Prefs.Replace && !Prefs.Paused); };
+            // Перехватчик отдаёт окну действие — сторож ждёт ответа потока окна (завис — клавиши идут мимо нас)
+            if (switcher.Guard != null) Hook.Posting = switcher.Guard.Arm;
+            Action sync = delegate { Hook.Sync(HookWanted); };
             Prefs.Changed += sync;
             sync();
             // Сборщик мусора не останавливает программу надолго: долгая пауза — повод для Windows снять перехватчик
             try { System.Runtime.GCSettings.LatencyMode = System.Runtime.GCLatencyMode.SustainedLowLatency; } catch { }
 
+            // Пока идёт игра — в стороне (Aside.cs): перехватчик снят, захваты закрыты, чужие окна не трогаются.
+            // Подмена списка процессов (SMENA_FAKE_PROCS) — только без окон, для проверок
+            Procs.AllowFake = headless;
+            Aside.CoreGame = delegate { return AppHub.CoreGame; };
+            Aside.Wire(switcher, sync);
+
             AppHub.Show = switcher.OpenSticky;
             AppHub.Start(app.Dispatcher);
+            Aside.Start(app.Dispatcher);
 
             // Без трея решение о своём значке принимается так же — и пишется строкой: так связь с core.txt проверяется без экрана
             if (headless) Tray.Follow(Say);
@@ -147,6 +271,7 @@ namespace DevTxt.Smena
                 Action quit = delegate
                 {
                     Quitting = true;
+                    Aside.Stop();
                     Hook.Stop();
                     AppHub.Stop();
                     Tray.Stop();
@@ -263,6 +388,7 @@ namespace DevTxt.Smena
                 };
                 icon.MouseClick += delegate(object s, System.Windows.Forms.MouseEventArgs e) { if (e.Button == System.Windows.Forms.MouseButtons.Left) about.ShowWindow(); };
                 Prefs.Changed += Render;
+                Aside.Changed += Render;
                 Render();
             }
             catch { icon = null; }
@@ -300,7 +426,7 @@ namespace DevTxt.Smena
         static void Render()
         {
             if (icon == null) return;
-            icon.Text = Program.Id + ".txt" + (Prefs.Paused ? " — приостановлено" : "");
+            icon.Text = Program.Id + ".txt" + (Prefs.Paused ? " — приостановлено" : Aside.On ? " — в стороне: " + Aside.Text.ToLowerInvariant() : "");
         }
 
         public static void Stop()
@@ -320,8 +446,12 @@ namespace DevTxt.Smena
         public static volatile bool Games = true;          // не вмешиваться, когда впереди окно на весь экран
         public static volatile bool AllDesktops = false;   // показывать окна со всех рабочих столов
         public static volatile bool Paused = false;        // приостановлено из трея; на диск не пишется
-        public static double Size = Layout.DefaultPreview; // ширина превью
+        public static double Size = Layout.DefaultPreview; // ширина превью (только для сетки)
+        public static string View = "grid";               // вид переключателя: "grid" — сетка, иначе объёмная раскладка (Views)
         public static bool Persist = true;                 // false — ничего не писать на диск (--demo)
+        // Свои имена процессов к спискам игр (Games): ключ asideProcesses в settings.json, в интерфейсе его нет.
+        // Меняется только целиком — его читают и из других потоков.
+        public static volatile string[] Extra = new string[0];
         public static event Action Changed;                // вызывается в потоке окна
 
         public static string Dir
@@ -337,7 +467,8 @@ namespace DevTxt.Smena
 
         public static void Reset()
         {
-            Replace = true; SameApp = true; Games = true; AllDesktops = false; Paused = false; Size = Layout.DefaultPreview;
+            Replace = true; SameApp = true; Games = true; AllDesktops = false; Paused = false; Size = Layout.DefaultPreview; View = "grid";
+            Extra = new string[0];
         }
 
         // Размер превью — в пределах и по шагу ползунка
@@ -365,6 +496,8 @@ namespace DevTxt.Smena
                 AllDesktops = Flag(d, "allDesktops", AllDesktops);
                 object v;
                 if (d.TryGetValue("size", out v) && (v is int || v is decimal || v is double)) Size = Snap(Convert.ToDouble(v));
+                if (d.TryGetValue("view", out v)) View = KnownView(v as string);
+                if (d.TryGetValue("asideProcesses", out v)) Extra = DevTxt.Smena.Games.Extra(v);
             }
             catch { }   // файла ещё нет или он испорчен — остаются значения по умолчанию
         }
@@ -375,10 +508,14 @@ namespace DevTxt.Smena
             try
             {
                 Directory.CreateDirectory(Dir);
-                File.WriteAllText(FilePath, new JavaScriptSerializer().Serialize(new Dictionary<string, object>
+                var d = new Dictionary<string, object>
                 {
-                    { "replace", Replace }, { "sameApp", SameApp }, { "games", Games }, { "allDesktops", AllDesktops }, { "size", Size }
-                }));
+                    { "replace", Replace }, { "sameApp", SameApp }, { "games", Games }, { "allDesktops", AllDesktops }, { "size", Size }, { "view", View }
+                };
+                // Свои имена процессов пишутся обратно, иначе первое же изменение настроек их стёрло бы
+                string[] extra = Extra;
+                if (extra.Length > 0) d["asideProcesses"] = extra;
+                File.WriteAllText(FilePath, new JavaScriptSerializer().Serialize(d));
             }
             catch { }
         }
@@ -405,6 +542,24 @@ namespace DevTxt.Smena
         {
             if (key != "size" || Size == n) return false;
             Size = n;
+            Announce(true);
+            return true;
+        }
+
+        // Виды переключателя по порядку и их названия в настройках: сетка и объёмные раскладки (Flip.Views)
+        public static readonly string[] Views = { "grid", "flip", "cascade", "cover", "carousel", "fan", "panorama", "helix", "rolodex", "tunnel" };
+        public static readonly string[] ViewLabels = { "Сетка", "Стопка", "Каскад", "Обложки", "Карусель", "Веер", "Панорама", "Спираль", "Барабан", "Туннель" };
+
+        // Вид переключателя: незнакомое значение — сетка
+        public static string KnownView(string v) { return v != null && Array.IndexOf(Views, v) >= 0 ? v : "grid"; }
+
+        // Объёмный вид (не сетка)
+        public static bool Is3D(string v) { return v != "grid" && KnownView(v) == v; }
+
+        public static bool Set(string key, string value)
+        {
+            if (key != "view" || View == value) return false;
+            View = KnownView(value);
             Announce(true);
             return true;
         }
